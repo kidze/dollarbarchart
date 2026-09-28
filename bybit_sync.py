@@ -1,11 +1,13 @@
-"""Keep a local copy of Bybit's BTCUSDT linear-perp 1-minute candles (public v5 kline endpoint, keyless).
+"""Bybit v5 public kline access (keyless) and the per-market candle files.
 
-Stored in data/bybit_btcusdt_1m.parquet with columns ts (ms, candle open), open, high, low, close,
-volume (BTC) and turnover (USDT = the dollars traded in that minute, which is what dollar bars need).
-Resumable: re-run to append whatever is missing; the last stored candle is refetched because it may
-have been captured while still forming.
+A market is "spot:BTCUSDT" or "linear:BTCUSDT" (USDT/USDC perpetual). Each one lives in
+data/bybit_<category>_<SYMBOL>.parquet with columns ts (ms, candle open), open, high, low, close,
+volume (base coin) and turnover (quote coin = the dollars traded in that minute, which is what
+dollar bars need). Backfills stream rows to a callback so the chart can grow while the download
+runs, checkpoint every 100 requests, and stop within one request when asked (the app never keeps
+downloading after its window is closed; the next launch resumes where it stopped).
 
-Run directly to backfill:  python bybit_sync.py
+Run directly to backfill one market from the command line:  python bybit_sync.py linear:ETHUSDT
 """
 import json
 import os
@@ -17,87 +19,120 @@ from pathlib import Path
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-PATH = HERE / "data" / "bybit_btcusdt_1m.parquet"
-URL = ("https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=1&limit=1000"
-       "&start={start}&end={end}")
+DATA = HERE / "data"
+API = "https://api.bybit.com/v5/market/kline"
 COLS = ["ts", "open", "high", "low", "close", "volume", "turnover"]
-FIRST_MS = 1_585_094_400_000          # 2020-03-25, when Bybit's USDT perpetual started trading
+CATEGORIES = ("spot", "linear")
 MINUTE = 60_000
 WINDOW = 1000 * MINUTE                # one request covers 1000 minutes
+UA = {"User-Agent": "dollarbarchart/2"}
 
 
-def fetch(start_ms: int, end_ms: int) -> list:
-    """One kline request, returned oldest-first. Retries on transport errors."""
-    for attempt in range(6):
+def parse(key: str) -> tuple[str, str]:
+    """'linear:BTCUSDT' -> ('linear', 'BTCUSDT'); rejects anything that is not a plain category:symbol."""
+    category, _, symbol = key.partition(":")
+    if category not in CATEGORIES or not symbol or not symbol.isalnum() or symbol != symbol.upper():
+        raise ValueError(f"bad market key {key!r}")
+    return category, symbol
+
+
+def path(key: str) -> Path:
+    category, symbol = parse(key)
+    return DATA / f"bybit_{category}_{symbol}.parquet"
+
+
+def kline(category: str, symbol: str, interval: str = "1", start_ms=None, end_ms=None, limit: int = 1000,
+          attempts: int = 6, timeout: float = 20, stop=None) -> list:
+    """One kline request, rows oldest-first as [ts, o, h, l, c, volume, turnover]. Retries transport errors
+    (not when stop() asks to quit)."""
+    url = f"{API}?category={category}&symbol={symbol}&interval={interval}&limit={limit}"
+    if start_ms is not None:
+        url += f"&start={int(start_ms)}"
+    if end_ms is not None:
+        url += f"&end={int(end_ms)}"
+    for attempt in range(attempts):
         try:
-            req = urllib.request.Request(URL.format(start=start_ms, end=end_ms), headers={"User-Agent": "dollar-bars/1"})
-            r = json.load(urllib.request.urlopen(req, timeout=20))
-            if r.get("retCode") != 0:
-                raise RuntimeError(f"bybit retCode {r.get('retCode')}: {r.get('retMsg')}")
+            r = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout))
+            code = r.get("retCode")
+            if code == 10001:                                    # parameter error (unknown symbol...): retrying will not help
+                raise LookupError(f"bybit: {r.get('retMsg')} ({url})")
+            if code != 0:                                        # 10016 "svc error", 10006 rate limit...: transient, retry
+                raise RuntimeError(f"bybit retCode {code}: {r.get('retMsg')}")
             rows = [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5]), float(x[6])]
                     for x in r["result"]["list"]]
             rows.sort()
             return rows
+        except LookupError:
+            raise
         except Exception:
-            if attempt == 5:
+            if attempt == attempts - 1 or (stop and stop()):
                 raise
             time.sleep(1.5 * (attempt + 1))
     return []
 
 
-def load() -> pd.DataFrame:
-    return pd.read_parquet(PATH) if PATH.exists() else pd.DataFrame(columns=COLS)
+def fetch(key: str, start_ms: int, end_ms: int, stop=None) -> list:
+    category, symbol = parse(key)
+    return kline(category, symbol, "1", start_ms, end_ms, stop=stop)
 
 
-def save(df: pd.DataFrame) -> None:
-    """Atomic write: a crash mid-write leaves the old file intact instead of a truncated one."""
-    PATH.parent.mkdir(exist_ok=True)
-    tmp = PATH.with_suffix(".tmp")
-    df.to_parquet(tmp, index=False)
-    os.replace(tmp, PATH)
-
-
-def latest(n: int = 3) -> list:
+def latest(key: str, n: int = 3) -> list:
     """The newest n candles (the last one is still forming). Used by the live poller."""
-    req = urllib.request.Request(f"https://api.bybit.com/v5/market/kline?category=linear&symbol=BTCUSDT&interval=1&limit={n}",
-                                 headers={"User-Agent": "dollar-bars/1"})
-    r = json.load(urllib.request.urlopen(req, timeout=10))
-    rows = [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5]), float(x[6])] for x in r["result"]["list"]]
-    rows.sort()
-    return rows
+    category, symbol = parse(key)
+    return kline(category, symbol, "1", limit=n)
 
 
-def sync(progress=None, stop=None, pause: float = 0.05) -> pd.DataFrame:
-    """Append everything from the last stored candle to now; returns the full frame."""
-    df = load()
-    cursor = int(df["ts"].iloc[-1]) if len(df) else FIRST_MS
-    new, requests = [], 0
+def first_candle_ms(key: str, quick: bool = False):
+    """Open time of the market's first weekly candle (one request: 1000 weeks covers any listing), or None
+    when Bybit has no candles for it. The 1-minute backfill starts there; the first minutes of the week
+    that precede the first trade are just empty windows. quick = one short attempt (interactive callers)."""
+    category, symbol = parse(key)
+    rows = kline(category, symbol, "W", limit=1000, attempts=1 if quick else 6, timeout=5 if quick else 20)
+    return rows[0][0] if rows else None
+
+
+def load(key: str) -> pd.DataFrame:
+    p = path(key)
+    return pd.read_parquet(p) if p.exists() else pd.DataFrame(columns=COLS)
+
+
+def save(key: str, df: pd.DataFrame) -> None:
+    """Atomic write: a crash mid-write leaves the old file intact instead of a truncated one."""
+    p = path(key)
+    p.parent.mkdir(exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    df.to_parquet(tmp, index=False)
+    os.replace(tmp, p)
+
+
+def sync(key: str, on_rows, cursor_ms: int, stop=None, checkpoint=None, pause: float = 0.05) -> str:
+    """Stream 1-minute candles from cursor_ms up to now into on_rows(rows), oldest first.
+
+    Returns "done" once the forming candle is reached, or "stopped" when stop() asked to quit (the caller
+    keeps what it received; the next sync resumes from its last candle, which is refetched because it may
+    have been forming). checkpoint(requests) is called every 100 requests so the caller can persist.
+    """
+    cursor, requests = int(cursor_ms), 0
     while True:
+        if stop and stop():
+            return "stopped"
         now_ms = int(time.time() * 1000)
         end = cursor + WINDOW - 1
-        rows = fetch(cursor, end)
+        rows = fetch(key, cursor, end, stop=stop)
         requests += 1
         if rows:
-            new.extend(rows)
+            on_rows(rows)
             last = rows[-1][0]
-            if progress and requests % 25 == 0:
-                progress(last, len(new))
-            if last >= now_ms - MINUTE:            # reached the forming candle
-                break
+            if last >= now_ms - MINUTE:                          # reached the forming candle
+                return "done"
             cursor = last + MINUTE
         else:
             if end >= now_ms:
-                break
-            cursor = end + 1                        # a window with no candles (exchange downtime): skip it
-        if stop and stop():
-            break
+                return "done"
+            cursor = end + 1                                     # a window with no candles (pre-listing, downtime): skip it
+        if checkpoint and requests % 100 == 0:
+            checkpoint(requests)
         time.sleep(pause)
-        if len(new) >= 200_000 and requests % 200 == 0:     # first-run backfill: checkpoint so a closed window loses nothing
-            df = merge(df, new); new = []; save(df)
-    if new:
-        df = merge(df, new)
-        save(df)
-    return df
 
 
 def merge(df: pd.DataFrame, new: list) -> pd.DataFrame:
@@ -108,11 +143,25 @@ def merge(df: pd.DataFrame, new: list) -> pd.DataFrame:
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
+    market = sys.argv[1] if len(sys.argv) > 1 else "linear:BTCUSDT"
     t0 = time.time()
+    frame = load(market)
+    start = int(frame["ts"].iloc[-1]) if len(frame) else first_candle_ms(market)
+    if start is None:
+        sys.exit(f"{market}: Bybit has no candles for this market")
+    got = []
 
-    def show(last_ms, n):
-        print(f"  {time.strftime('%Y-%m-%d %H:%M', time.gmtime(last_ms // 1000))}Z  {n:,} candles  {time.time() - t0:5.0f}s", flush=True)
+    def take(rows):
+        got.extend(rows)
+        if len(got) % 50_000 < 1000:
+            print(f"  {time.strftime('%Y-%m-%d %H:%M', time.gmtime(rows[-1][0] // 1000))}Z  {len(got):,} candles  {time.time() - t0:5.0f}s", flush=True)
 
-    frame = sync(progress=show)
-    print(f"done: {len(frame):,} candles, {time.strftime('%Y-%m-%d %H:%M', time.gmtime(int(frame['ts'].iloc[0]) // 1000))}Z -> "
+    def flush(_requests):
+        global frame, got
+        if got:
+            frame = merge(frame, got); got = []; save(market, frame)
+
+    sync(market, take, start, checkpoint=flush)
+    flush(0)
+    print(f"done: {market} {len(frame):,} candles, {time.strftime('%Y-%m-%d %H:%M', time.gmtime(int(frame['ts'].iloc[0]) // 1000))}Z -> "
           f"{time.strftime('%Y-%m-%d %H:%M', time.gmtime(int(frame['ts'].iloc[-1]) // 1000))}Z in {time.time() - t0:.0f}s")

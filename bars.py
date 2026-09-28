@@ -8,18 +8,20 @@ Every bar's `t` is its open time (seconds), like TradingView; `e` is its close t
 import numpy as np
 import pandas as pd
 
-DOLLAR_SIZES = [1e9, 2e9, 5e9, 10e9, 20e9, 50e9]
+SIZE_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10]        # dollar sizes offered = the market's median day x these
 TIMEFRAMES = ["1h", "4h", "1D", "1W", "1M"]
 MINUTE = 60_000
 DAY = 86_400_000
 
 
 class Candles:
-    """ts (ms), open, high, low, close, turnover in arrays with spare capacity so live candles append in place."""
+    """ts (ms), open, high, low, close, volume, turnover in arrays with spare capacity so live candles append in place."""
 
-    def __init__(self, df: pd.DataFrame):
+    ARRAYS = ("ts", "o", "h", "l", "c", "v", "d")
+
+    def __init__(self, df: pd.DataFrame, spare: int = 20_000):
         n = len(df)
-        self.cap = n + 1_000_000
+        self.cap = n + spare
         self.n = n
         self.ts = np.zeros(self.cap, np.int64); self.ts[:n] = df["ts"].to_numpy(np.int64)
         self.o = np.zeros(self.cap); self.o[:n] = df["open"].to_numpy(float)
@@ -29,6 +31,14 @@ class Candles:
         self.v = np.zeros(self.cap); self.v[:n] = df["volume"].to_numpy(float)
         self.d = np.zeros(self.cap); self.d[:n] = df["turnover"].to_numpy(float)
         self.dirty_from = n                                  # first index not yet written to the parquet
+        self.touched = n                                     # lowest index rewritten since the bar sets were last updated
+
+    def _grow(self) -> None:
+        self.cap = self.cap + self.cap // 2 + 100_000
+        for name in self.ARRAYS:
+            a = getattr(self, name)
+            b = np.zeros(self.cap, a.dtype); b[:self.n] = a[:self.n]
+            setattr(self, name, b)
 
     def upsert(self, rows) -> None:
         """rows = [[ts, o, h, l, c, volume, turnover], ...] oldest-first; replaces the candle with the same ts, appends newer ones."""
@@ -38,9 +48,12 @@ class Candles:
                 continue                                     # older than what we hold: ignore
             i = self.n - 1 if (self.n and ts == self.ts[self.n - 1]) else self.n
             if i == self.n:
+                if i >= self.cap:
+                    self._grow()
                 self.n += 1
             self.ts[i], self.o[i], self.h[i], self.l[i], self.c[i], self.v[i], self.d[i] = ts, r[1], r[2], r[3], r[4], r[5], r[6]
             self.dirty_from = min(self.dirty_from, i)
+            self.touched = min(self.touched, i)
 
     def frame(self) -> pd.DataFrame:
         n = self.n
@@ -50,9 +63,14 @@ class Candles:
     def bar(self, i0: int, i1: int) -> dict:
         """One bar from candles i0..i1 inclusive."""
         return {"t": int(self.ts[i0] // 1000), "e": int((self.ts[i1] + MINUTE) // 1000),
-                "o": round(float(self.o[i0]), 1), "h": round(float(self.h[i0:i1 + 1].max()), 1),
-                "l": round(float(self.l[i0:i1 + 1].min()), 1), "c": round(float(self.c[i1]), 1),
-                "d": round(float(self.d[i0:i1 + 1].sum()) / 1e9, 4), "n": int(i1 - i0 + 1)}
+                "o": _px(self.o[i0]), "h": _px(self.h[i0:i1 + 1].max()),
+                "l": _px(self.l[i0:i1 + 1].min()), "c": _px(self.c[i1]),
+                "d": int(round(float(self.d[i0:i1 + 1].sum()))), "n": int(i1 - i0 + 1)}
+
+
+def _px(x) -> float:
+    """Prices as sent to the chart: 6 significant digits is plenty for a candle and keeps sub-cent coins exact enough."""
+    return float(f"{float(x):.6g}")
 
 
 def dollar_bars(cd: Candles, size: float, start: int = 0):
@@ -104,24 +122,38 @@ def time_bars(cd: Candles, tf: str, start: int = 0):
 
 
 def auto_size(cd: Candles) -> float:
-    """Median daily turnover over the last 365 days, rounded to two significant figures."""
+    """Median daily turnover over the last 365 days, rounded to two significant figures.
+    Falls back to the average day (or $1M) while a market has only a day or two of candles."""
     n = cd.n
     last = cd.ts[n - 1]
     m = cd.ts[:n] >= last - 365 * DAY
     days = cd.ts[:n][m] // DAY
     daily = pd.Series(cd.d[:n][m]).groupby(days).sum()
-    daily = daily.iloc[1:-1] if len(daily) > 2 else daily     # drop the two partial days
-    return float(f"{float(daily.median()):.2g}")
+    med = float(daily.iloc[1:-1].median()) if len(daily) > 2 else float(daily.mean())   # drop the two partial days
+    if not med > 0:
+        total = float(cd.d[:n].sum())
+        span_days = max(1.0, (cd.ts[n - 1] - cd.ts[0]) / DAY)
+        med = total / span_days if total > 0 else 1e6
+    return float(f"{med:.2g}")
+
+
+def sizes_for(auto: float) -> list:
+    """The menu: the median day and a few multiples either side, each rounded to two significant figures."""
+    out = {float(f"{auto * k:.2g}") for k in SIZE_STEPS}
+    out.add(auto)
+    return sorted(s for s in out if s > 0)
 
 
 def size_key(size: float) -> str:
-    return f"d:{int(size)}"
+    """Must equal the page's 'd:' + size (JS Number#toString): whole dollars without '.0', fractions in
+    shortest round-trip form (only markets with a median day under $100 ever have fractional sizes)."""
+    return f"d:{int(size)}" if size == int(size) else f"d:{size!r}"
 
 
 def build_all(cd: Candles) -> tuple[dict, dict]:
     """All bar sets from scratch. Returns (sets, meta)."""
     auto = auto_size(cd)
-    sizes = sorted(set(DOLLAR_SIZES) | {auto})
+    sizes = sizes_for(auto)
     sets = {}
     for s in sizes:
         bars, forming, st = dollar_bars(cd, s)
@@ -130,20 +162,22 @@ def build_all(cd: Candles) -> tuple[dict, dict]:
         bars, forming, st = time_bars(cd, tf)
         sets["t:" + tf] = {"bars": bars, "forming": forming, "start": st, "tf": tf}
     meta = {"auto_size": auto, "sizes": sizes, "timeframes": TIMEFRAMES,
-            "first": int(cd.ts[0] // 1000), "last": int(cd.ts[cd.n - 1] // 1000), "n_candles": int(cd.n),
-            "source": "Bybit BTCUSDT perpetual, 1-minute candles, dollars = exchange-reported turnover"}
+            "first": int(cd.ts[0] // 1000), "last": int(cd.ts[cd.n - 1] // 1000), "n_candles": int(cd.n)}
+    cd.touched = cd.n
     return sets, meta
 
 
 def update_all(sets: dict, cd: Candles) -> None:
-    """Recompute only from each set's forming bar onward (cheap; called after every live candle)."""
-    last_ts = int(cd.ts[cd.n - 1])
+    """Recompute only from each set's forming bar onward (cheap; called after every live candle).
+    A dollar bar that closed on a candle this upsert rewrote (a minute first seen while still forming) is
+    re-cut with the fuller candle, even when later minutes arrived in the same upsert."""
     for key, s in sets.items():
         if key.startswith("d:"):
-            if s["bars"] and s["bars"][-1]["e"] * 1000 > last_ts:      # closed on the still-forming minute: re-cut it with the fuller minute
+            while s["bars"] and s["start"] - 1 >= cd.touched:    # its closing candle changed: cut it again
                 s["start"] -= s["bars"].pop()["n"]
             bars, forming, st = dollar_bars(cd, s["size"], s["start"])
         else:
             bars, forming, st = time_bars(cd, s["tf"], s["start"])
         s["bars"].extend(bars)
         s["forming"], s["start"] = forming, st
+    cd.touched = cd.n
