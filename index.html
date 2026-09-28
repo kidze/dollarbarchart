@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BTC dollar bars</title>
+<style>
+  :root{--bg:#0b0c0e;--s1:#121316;--bd:#23262d;--tx:#e6e8ec;--tx2:#a8adb8;--tx3:#6e7681;--up:#2ebd85;--dn:#f23645;--acc:#5cb8f2}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font:14px/1.45 -apple-system,"Segoe UI",Inter,Roboto,sans-serif}
+  body{display:flex;flex-direction:column}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:9px 16px;border-bottom:1px solid var(--bd);background:var(--s1)}
+  h1{font-size:16px;margin:0;font-weight:700;white-space:nowrap}
+  .seg{display:inline-flex;border:1px solid var(--bd);border-radius:8px;overflow:hidden}
+  .seg button{background:transparent;color:var(--tx2);border:0;padding:6px 12px;font:inherit;font-weight:600;cursor:pointer}
+  .seg button.on{background:var(--acc);color:#08131c}
+  select{background:#1a1c20;color:var(--tx);border:1px solid var(--bd);border-radius:8px;padding:5px 8px;font:inherit;font-weight:600}
+  label{color:var(--tx3);font-size:12.5px}
+  #status{margin-left:auto;font-size:12.5px;color:var(--tx3);white-space:nowrap}
+  #status i{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--tx3);margin-right:6px;vertical-align:middle}
+  #status.live i{background:var(--up)}
+  #stats{width:100%;color:var(--tx2);font-size:12.5px}
+  #stats b{color:var(--tx)}
+  #legend{position:absolute;z-index:5;left:14px;top:10px;font-size:12.5px;color:var(--tx2);pointer-events:none;
+          font-variant-numeric:tabular-nums;background:rgba(11,12,14,.72);padding:4px 8px;border-radius:6px}
+  #legend b{color:var(--tx)}
+  #wrap{position:relative;flex:1;min-height:0}
+  #chart{position:absolute;inset:0}
+  #axis{position:absolute;z-index:6;right:6px;bottom:5px;display:flex;gap:3px}
+  #axis button{width:20px;height:18px;padding:0;border:1px solid var(--bd);border-radius:4px;background:var(--s1);color:var(--tx3);
+               font:700 11px/1 -apple-system,"Segoe UI",Inter,Roboto,sans-serif;cursor:pointer}
+  #axis button.on{color:var(--acc);border-color:var(--acc)}
+  #banner{position:absolute;z-index:7;left:50%;top:12px;transform:translateX(-50%);display:none;align-items:center;gap:12px;
+          background:#1a1c20;border:1px solid var(--acc);border-radius:10px;padding:8px 10px 8px 14px;font-size:13px;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+  #banner.show{display:flex}
+  #banner button{background:var(--acc);color:#08131c;border:0;border-radius:7px;padding:6px 12px;font:inherit;font-weight:700;cursor:pointer}
+  footer{padding:7px 16px;border-top:1px solid var(--bd);color:var(--tx3);font-size:11.5px;background:var(--s1)}
+</style>
+</head>
+<body>
+<header>
+  <h1>BTC</h1>
+  <div class="seg"><button id="bDollar" class="on">Dollar bars</button><button id="bTime">Time bars</button></div>
+  <label id="lSize">size <select id="size"></select></label>
+  <label id="lTf" style="display:none">timeframe <select id="tf"></select></label>
+  <div id="status"><i></i><span>connecting…</span></div>
+  <div id="stats"></div>
+</header>
+<div id="wrap">
+  <div id="chart"></div>
+  <div id="legend">hover a bar</div>
+  <div id="axis"><button id="bAuto" title="Auto scale (double-click the price axis does the same)">A</button><button id="bLog" title="Logarithmic price scale">L</button></div>
+  <div id="banner"><span id="bannerText"></span><button id="bannerBtn">Update now</button></div>
+</div>
+<footer id="foot"></footer>
+<script src="lightweight-charts.js"></script>
+<script>
+(function(){
+  var LC = window.LightweightCharts, TF = ['1h','4h','1D','1W','1M'];
+  var P = {}; try { P = JSON.parse(localStorage.getItem('dollarbars') || '{}'); } catch (e) {}
+  var mode = P.mode || 'dollar', size = P.size || null, tf = P.tf || '1D', logScale = !!P.log;
+  var meta = null, bars = [], forming = null, byTime = {}, loading = false, retryTimer = null, restarting = false, update = null;
+  var save = function(){ try { localStorage.setItem('dollarbars', JSON.stringify({mode:mode, size:size, tf:tf, log:logScale})); } catch (e) {} };
+  var fmtB = function(x){ return '$' + (x >= 10 ? x.toFixed(0) : x.toFixed(1)) + 'B'; };
+  var fmtT = function(t){ return new Date(t*1000).toISOString().slice(0,16).replace('T',' ') + 'Z'; };
+  var fmtDay = function(t){ return new Date(t*1000).toISOString().slice(0,10); };
+  var fmtHrs = function(h){ return h >= 48 ? (h/24).toFixed(1) + ' days' : h >= 1 ? h.toFixed(1) + ' h' : Math.round(h*60) + ' min'; };
+  var key = function(){ return mode === 'dollar' ? 'd:' + size : 't:' + tf; };
+  var $ = function(id){ return document.getElementById(id); };
+  var sameBar = function(a, b){ return a && b && a.t === b.t && a.o === b.o && a.h === b.h && a.l === b.l && a.c === b.c && a.d === b.d; };
+
+  var chart = LC.createChart($('chart'), {
+    layout:{background:{type:'solid',color:'#0b0c0e'},textColor:'#a8adb8',fontSize:12},
+    grid:{vertLines:{color:'#16181d'},horzLines:{color:'#16181d'}},
+    crosshair:{mode:0}, rightPriceScale:{borderColor:'#23262d', mode: logScale ? 1 : 0},
+    timeScale:{borderColor:'#23262d',timeVisible:true,secondsVisible:false,rightOffset:6,barSpacing:8,minBarSpacing:2},
+    localization:{priceFormatter:function(p){ return p >= 1000 ? p.toLocaleString('en-US',{maximumFractionDigits:0}) : p.toFixed(1); }}
+  });
+  var series = chart.addSeries(LC.CandlestickSeries, {upColor:'#2ebd85',downColor:'#f23645',wickUpColor:'#2ebd85',wickDownColor:'#f23645',borderVisible:false});
+  var scale = chart.priceScale('right');
+  new ResizeObserver(function(){ chart.applyOptions({width:$('chart').clientWidth, height:$('chart').clientHeight}); }).observe($('chart'));
+
+  // A / L buttons on the price axis, like TradingView. Dragging the axis switches auto scale off; A puts it back.
+  $('bAuto').onclick = function(){ scale.applyOptions({autoScale: !scale.options().autoScale}); };
+  $('bLog').onclick = function(){ logScale = !logScale; scale.applyOptions({mode: logScale ? 1 : 0}); save(); };
+  setInterval(function(){ $('bAuto').className = scale.options().autoScale ? 'on' : ''; $('bLog').className = logScale ? 'on' : ''; }, 300);
+  $('bLog').className = logScale ? 'on' : '';
+
+  function candle(r){ return {time:r.t, open:r.o, high:r.h, low:r.l, close:r.c}; }
+  function setStatus(m, note){
+    var s = $('status'); s.className = m.sync === 'live' ? 'live' : '';
+    s.querySelector('span').textContent = (note || m.sync) + (m.last ? ' · last candle ' + fmtT(m.last).slice(11) : '') +
+      (m.updated ? ' · checked ' + new Date(m.updated*1000).toISOString().slice(11,19) + 'Z' : '');
+  }
+  function stats(){
+    var n = bars.length; if (!n) { $('stats').textContent = ''; return; }
+    var hrs = bars.map(function(b){ return (b.e - b.t)/3600; }).sort(function(a,b){ return a-b; });
+    var med = hrs[Math.floor(n/2)], last365 = bars.filter(function(b){ return b.e >= bars[n-1].e - 365*86400; }).length;
+    var months = {}, m0 = fmtDay(bars[0].t).slice(0,7), m1 = fmtDay(bars[n-1].t).slice(0,7);
+    for (var d = new Date(m0 + '-01T00:00:00Z'); d.toISOString().slice(0,7) <= m1; d.setUTCMonth(d.getUTCMonth()+1)) months[d.toISOString().slice(0,7)] = 0;
+    bars.forEach(function(b){ months[fmtDay(b.t).slice(0,7)]++; });
+    var full = Object.keys(months).filter(function(k){ return k !== m0 && k !== m1; });   // drop the two partial months
+    var busy = full.slice().sort(function(a,b){ return months[b]-months[a]; })[0], quiet = full.slice().sort(function(a,b){ return months[a]-months[b]; })[0];
+    var what = mode === 'dollar' ? 'bars of ' + fmtB(size/1e9) : tf + ' bars';
+    $('stats').innerHTML = '<b>' + n.toLocaleString() + '</b> ' + what + ' since ' + fmtDay(bars[0].t) +
+      (mode === 'dollar' ? ' · median bar <b>' + fmtHrs(med) + '</b> (fastest ' + fmtHrs(hrs[0]) + ', slowest ' + fmtHrs(hrs[n-1]) + ')' : '') +
+      (busy ? ' · busiest month <b>' + busy + '</b> ' + months[busy] + ' bars, quietest <b>' + quiet + '</b> ' + months[quiet] : '') +
+      ' · last 365 days <b>' + last365 + '</b>' + (forming ? ' · forming: ' + (mode === 'dollar' ? fmtB(forming.d) + ' of ' + fmtB(size/1e9) + ' (' + Math.round(forming.d*1e9/size*100) + '%)' : 'open since ' + fmtT(forming.t)) : '');
+  }
+  function render(reset){
+    byTime = {}; bars.forEach(function(b){ byTime[b.t] = b; });
+    var data = bars.map(candle);
+    if (forming) { byTime[forming.t] = forming; data.push(candle(forming)); }
+    series.setData(data);
+    if (reset) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0, data.length - 260), to:data.length + 4}); scale.applyOptions({autoScale:true}); }
+    stats();
+  }
+  function scheduleRetry(){ clearTimeout(retryTimer); retryTimer = setTimeout(function(){ load(true); }, 3000); }
+  function load(reset){
+    if (loading) return Promise.resolve();
+    loading = true;
+    return fetch('/bars').then(function(r){ return r.json(); }).then(function(j){
+      meta = j.meta; setStatus(meta); checkUpdate(meta);
+      if (!Object.keys(j.keys).length) { $('stats').textContent = meta.sync + ' — history is loading, retrying…'; scheduleRetry(); return; }
+      if (size === null || meta.sizes.indexOf(size) < 0) size = meta.auto_size;      // the median-day size can change after a catch-up
+      var sel = $('size'); sel.innerHTML = meta.sizes.map(function(s){ return '<option value="' + s + '"' + (s === size ? ' selected' : '') + '>' + fmtB(s/1e9) + (s === meta.auto_size ? ' (median day)' : '') + '</option>'; }).join('');
+      var tsel = $('tf'); if (!tsel.options.length) tsel.innerHTML = TF.map(function(t){ return '<option value="' + t + '"' + (t === tf ? ' selected' : '') + '>' + t + '</option>'; }).join('');
+      var k = j.keys[key()]; if (!k) { scheduleRetry(); return; }
+      bars = k.bars; forming = k.forming; save();
+      $('foot').textContent = meta.source + ', ' + fmtDay(meta.first) + ' → now. A dollar bar closes with the minute that brings its turnover to the chosen size, so each holds the size plus that minute\'s overflow. ' +
+        'The x-axis is bar order, not the clock: every bar is the same width however long it took. Bar times are open times.';
+      render(reset);
+    }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; });
+  }
+  function poll(){
+    if (restarting) return;
+    var kk = key();
+    fetch('/live').then(function(r){ return r.json(); }).then(function(j){
+      if (restarting) return;
+      setStatus(j.meta); checkUpdate(j.meta);
+      if (kk !== key() || loading) return;                                   // a menu change is in flight: its load() will redraw
+      var k = j.keys[kk];
+      if (!k) { if (Object.keys(j.keys).length) load(true); return; }         // this size no longer exists (rebuilt after catch-up): reload
+      if (k.n > bars.length + 1) return load(false);                          // missed more than one bar (laptop slept?): reload
+      if (k.n === bars.length + 1) { var b = k.tail[k.tail.length-1]; bars.push(b); byTime[b.t] = b; series.update(candle(b)); }
+      else if (k.n === bars.length && k.n && !sameBar(k.tail[k.tail.length-1], bars[k.n-1])) {   // last bar re-cut with its fuller final minute
+        var r = k.tail[k.tail.length-1]; bars[k.n-1] = r; byTime[r.t] = r; series.update(candle(r));
+      }
+      forming = k.forming;
+      if (forming) { byTime[forming.t] = forming; series.update(candle(forming)); }
+      stats();
+    }).catch(function(){ if (!restarting) setStatus({sync:'server not answering'}); });
+  }
+
+  // update banner: the server reports when its own files changed; page-only changes reload, code changes restart it in place
+  function checkUpdate(m){
+    if (restarting) return;
+    if (!m || !m.update) { update = null; $('banner').className = ''; return; }
+    update = m.update;
+    $('bannerText').textContent = update.kind === 'reload'
+      ? 'Update available: ' + update.files.join(', ') + ' changed (page reload, instant)'
+      : 'Update available: ' + update.files.join(', ') + ' changed (server restart, about 10 s)';
+    $('banner').className = 'show';
+  }
+  $('bannerBtn').onclick = function(){
+    if (!update) return;
+    if (update.kind === 'reload') { location.reload(); return; }
+    restarting = true; $('bannerText').textContent = 'Restarting the server…'; $('bannerBtn').disabled = true; setStatus({sync:'restarting…'});
+    var oldPid = null, t0 = Date.now();
+    fetch('/restart').then(function(r){ return r.json(); }).then(function(j){ oldPid = j.pid; }).catch(function(){});
+    var iv = setInterval(function(){
+      fetch('/ping', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(j){
+        if (j.ok && oldPid !== null && j.pid !== oldPid) { clearInterval(iv); location.reload(); }   // the new copy answers: reload onto it
+        else if (Date.now() - t0 > 60000) { clearInterval(iv); $('bannerText').textContent = 'The server did not come back. Close this window and run launch.cmd again.'; }
+      }).catch(function(){});
+    }, 1000);
+  };
+
+  function switchTo(m){
+    mode = m; $('bDollar').className = m === 'dollar' ? 'on' : ''; $('bTime').className = m === 'time' ? 'on' : '';
+    $('lSize').style.display = m === 'dollar' ? '' : 'none'; $('lTf').style.display = m === 'time' ? '' : 'none';
+    save(); load(true);
+  }
+  $('bDollar').onclick = function(){ switchTo('dollar'); };
+  $('bTime').onclick = function(){ switchTo('time'); };
+  $('size').onchange = function(){ size = +this.value; save(); load(true); };
+  $('tf').onchange = function(){ tf = this.value; save(); load(true); };
+  if (mode === 'time') { $('bDollar').className = ''; $('bTime').className = 'on'; $('lSize').style.display = 'none'; $('lTf').style.display = ''; }
+
+  chart.subscribeCrosshairMove(function(p){
+    if (!p || !p.time) return;
+    var r = byTime[p.time]; if (!r) return;
+    var chg = +(((r.c / r.o - 1) * 100).toFixed(2)), isForming = forming && r.t === forming.t;
+    var head = mode === 'dollar'
+      ? '<b>' + fmtT(r.t) + ' → ' + fmtT(r.e) + '</b> · ' + (isForming ? 'forming, ' : 'took ') + '<b>' + fmtHrs((r.e - r.t)/3600) + '</b> (' + r.n + ' min) · ' + fmtB(r.d) + (isForming ? ' of ' + fmtB(size/1e9) : '') + ' traded'
+      : '<b>' + (tf === '1h' || tf === '4h' ? fmtT(r.t) : fmtDay(r.t)) + '</b> (' + tf + (isForming ? ', forming' : '') + ') · ' + fmtB(r.d) + ' traded';
+    $('legend').innerHTML = head + '<br>O ' + r.o.toLocaleString() + ' · H ' + r.h.toLocaleString() + ' · L ' + r.l.toLocaleString() +
+      ' · C ' + r.c.toLocaleString() + ' · <span style="color:' + (chg >= 0 ? '#2ebd85' : '#f23645') + '">' + (chg > 0 ? '+' : '') + chg.toFixed(2) + '%</span>';
+  });
+
+  load(true).then(function(){ setInterval(poll, 5000); });
+})();
+</script>
+</body>
+</html>

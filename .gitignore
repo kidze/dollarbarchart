@@ -1,0 +1,5 @@
+# downloaded candles (~110 MB, rebuilt by the server) and run logs
+data/
+logs/
+__pycache__/
+*.pyc
