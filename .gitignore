@@ -1,5 +1,7 @@
-# downloaded candles (~110 MB, rebuilt by the server) and run logs
+# downloaded candles (~16 MB per market-year), the instrument cache, the watchlist and run logs
 data/
 logs/
 __pycache__/
 *.pyc
+# feature-branch checkouts (git worktree) living next to the live app
+.worktrees/

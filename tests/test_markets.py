@@ -48,7 +48,7 @@ def test_search_ranking():
     keys = [x["key"] for x in MK.search(r, "LIT")]
     assert keys[:2] == ["linear:LITUSDT", "spot:LITUSDT"] and "linear:LITEUSDT" in keys
     assert [x["key"] for x in MK.search(r, "nvda")] == ["linear:NVDAUSDT", "spot:NVDAXUSDT"]
-    assert [x["key"] for x in MK.search(r, "pepe")] == ["linear:1000PEPEUSDT", "spot:PEPEUSDT"]
+    assert [x["key"] for x in MK.search(r, "pepe")] == ["spot:PEPEUSDT", "linear:1000PEPEUSDT"]   # exact ticker first, then the 1000x perp
     assert [x["key"] for x in MK.search(r, "hype")][0] == "linear:HYPEUSDT"
     assert [x["key"] for x in MK.search(r, "btc")] == ["linear:BTCUSDT", "spot:BTCUSDT", "spot:BTCUSDC"]
     assert MK.search(r, "bitcoin")[0]["key"] == "linear:BTCUSDT"

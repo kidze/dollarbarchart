@@ -34,7 +34,7 @@ import bybit_sync as X
 import markets as MK
 
 HERE = Path(__file__).resolve().parent
-PORT = 8793
+PORT = int(os.environ.get("DOLLARBARS_PORT", "8793"))         # a dev checkout runs on another port next to the live app
 POLL_S = 5
 IDLE_EXIT_S = 120
 LOOK_S = 60                                                      # a market counts as "on screen" this long after its last request
@@ -63,7 +63,8 @@ class Market:
         self.last_req = time.time()
         self.updated = 0.0
         self.synced = False                                      # reached "now" at least once this session
-        self.live_err = ""
+        self.live_err = ""                                       # last live-poll or download error, shown on the page
+        self.retry_at = 0.0                                      # a download that failed is retried after a pause
 
 
 def log(msg: str) -> None:
@@ -285,7 +286,12 @@ def resolve(ticker: str) -> tuple:
 
 
 def scan_pending() -> list:
-    return [r["key"] for r in (STATE["index"] or []) if r.get("first") is None and r["key"] not in STATE["index_first"]]
+    """Markets whose first-candle time is still unknown, the watchlist's own candidates first so the picker
+    can show "most history" for the tickers that matter before the long tail is probed."""
+    rows = [r for r in (STATE["index"] or []) if r.get("first") is None and r["key"] not in STATE["index_first"]]
+    wl = set(STATE["watchlist"])
+    rows.sort(key=lambda r: (r["ticker"] not in wl, r["kind"] != "perp"))
+    return [r["key"] for r in rows]
 
 
 # ---------------------------------------------------------------- the worker: downloads, one job at a time
@@ -293,7 +299,8 @@ def scan_pending() -> list:
 def next_job():
     with LOCK:
         now = time.time()
-        looked = [m for m in STATE["markets"].values() if on_screen(m, now) and m.sync in ("queued", "loading", "backfilling")]
+        looked = [m for m in STATE["markets"].values()
+                  if on_screen(m, now) and m.sync in ("queued", "loading", "backfilling") and m.retry_at <= now]
         if looked:
             return ("market", max(looked, key=lambda m: m.last_req).key)
         if STATE["index"] and scan_pending():
@@ -328,6 +335,7 @@ def sync_market(m: Market, job) -> None:
             return
     m.first_ms = int(cd.ts[0]) if cd.n else cursor
     m.sync = "backfilling"
+    m.live_err = ""
     t0 = time.time()
 
     def on_rows(rows):
@@ -348,8 +356,8 @@ def sync_market(m: Market, job) -> None:
         persist(m)
 
     result = X.sync(m.key, on_rows, cursor, stop=lambda: preempted(job), checkpoint=checkpoint)
-    persist(m)
     if result == "done":
+        persist(m)                                               # a pause keeps its rows in memory; checkpoints, eviction and exit write them
         with LOCK:
             if m.sets is not None and time.time() - t0 > 60:    # a long backfill: the median day may have changed, rebuild once
                 m.sets, m.meta = B.build_all(cd)
@@ -419,13 +427,21 @@ def worker() -> None:
                 scan_batch()
             else:
                 watch_job(arg)
-        except Exception as e:
-            log(f"job {job} failed: {type(e).__name__}: {e}")
+        except LookupError as e:                                 # Bybit rejects the symbol: no point retrying
+            log(f"job {job} rejected: {e}")
             if kind == "market":
-                STATE["markets"][arg].sync = f"failed: {type(e).__name__}: {e}"
+                STATE["markets"][arg].sync = f"failed: {e}"
             elif kind == "watch":
                 STATE["watch_done"].add(arg)
-            time.sleep(5)
+        except Exception as e:                                   # network / Bybit hiccup: keep what we have, retry in a while
+            log(f"job {job} failed: {type(e).__name__}: {e} (retrying in 30 s)")
+            if kind == "market":
+                m = STATE["markets"][arg]
+                m.live_err = f"{type(e).__name__}: {e}"
+                m.retry_at = time.time() + 30
+                m.sync = "backfilling" if m.sets else "queued"
+            else:
+                time.sleep(30 if not STATE["stop"] else 0)
         evict()
     WORKER_DONE.set()
 

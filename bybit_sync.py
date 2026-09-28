@@ -51,14 +51,17 @@ def kline(category: str, symbol: str, interval: str = "1", start_ms=None, end_ms
     for attempt in range(6):
         try:
             r = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=20))
-            if r.get("retCode") != 0:
-                raise RuntimeError(f"bybit retCode {r.get('retCode')}: {r.get('retMsg')}")
+            code = r.get("retCode")
+            if code == 10001:                                    # parameter error (unknown symbol...): retrying will not help
+                raise LookupError(f"bybit: {r.get('retMsg')} ({url})")
+            if code != 0:                                        # 10016 "svc error", 10006 rate limit...: transient, retry
+                raise RuntimeError(f"bybit retCode {code}: {r.get('retMsg')}")
             rows = [[int(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5]), float(x[6])]
                     for x in r["result"]["list"]]
             rows.sort()
             return rows
-        except RuntimeError:
-            raise                                                # Bybit said no (bad symbol etc.): retrying will not help
+        except LookupError:
+            raise
         except Exception:
             if attempt == 5:
                 raise
