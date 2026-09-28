@@ -41,16 +41,18 @@ def path(key: str) -> Path:
     return DATA / f"bybit_{category}_{symbol}.parquet"
 
 
-def kline(category: str, symbol: str, interval: str = "1", start_ms=None, end_ms=None, limit: int = 1000) -> list:
-    """One kline request, rows oldest-first as [ts, o, h, l, c, volume, turnover]. Retries transport errors."""
+def kline(category: str, symbol: str, interval: str = "1", start_ms=None, end_ms=None, limit: int = 1000,
+          attempts: int = 6, timeout: float = 20, stop=None) -> list:
+    """One kline request, rows oldest-first as [ts, o, h, l, c, volume, turnover]. Retries transport errors
+    (not when stop() asks to quit)."""
     url = f"{API}?category={category}&symbol={symbol}&interval={interval}&limit={limit}"
     if start_ms is not None:
         url += f"&start={int(start_ms)}"
     if end_ms is not None:
         url += f"&end={int(end_ms)}"
-    for attempt in range(6):
+    for attempt in range(attempts):
         try:
-            r = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=20))
+            r = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout))
             code = r.get("retCode")
             if code == 10001:                                    # parameter error (unknown symbol...): retrying will not help
                 raise LookupError(f"bybit: {r.get('retMsg')} ({url})")
@@ -63,15 +65,15 @@ def kline(category: str, symbol: str, interval: str = "1", start_ms=None, end_ms
         except LookupError:
             raise
         except Exception:
-            if attempt == 5:
+            if attempt == attempts - 1 or (stop and stop()):
                 raise
             time.sleep(1.5 * (attempt + 1))
     return []
 
 
-def fetch(key: str, start_ms: int, end_ms: int) -> list:
+def fetch(key: str, start_ms: int, end_ms: int, stop=None) -> list:
     category, symbol = parse(key)
-    return kline(category, symbol, "1", start_ms, end_ms)
+    return kline(category, symbol, "1", start_ms, end_ms, stop=stop)
 
 
 def latest(key: str, n: int = 3) -> list:
@@ -80,12 +82,12 @@ def latest(key: str, n: int = 3) -> list:
     return kline(category, symbol, "1", limit=n)
 
 
-def first_candle_ms(key: str):
+def first_candle_ms(key: str, quick: bool = False):
     """Open time of the market's first weekly candle (one request: 1000 weeks covers any listing), or None
     when Bybit has no candles for it. The 1-minute backfill starts there; the first minutes of the week
-    that precede the first trade are just empty windows."""
+    that precede the first trade are just empty windows. quick = one short attempt (interactive callers)."""
     category, symbol = parse(key)
-    rows = kline(category, symbol, "W", limit=1000)
+    rows = kline(category, symbol, "W", limit=1000, attempts=1 if quick else 6, timeout=5 if quick else 20)
     return rows[0][0] if rows else None
 
 
@@ -116,7 +118,7 @@ def sync(key: str, on_rows, cursor_ms: int, stop=None, checkpoint=None, pause: f
             return "stopped"
         now_ms = int(time.time() * 1000)
         end = cursor + WINDOW - 1
-        rows = fetch(key, cursor, end)
+        rows = fetch(key, cursor, end, stop=stop)
         requests += 1
         if rows:
             on_rows(rows)

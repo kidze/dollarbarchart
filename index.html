@@ -96,8 +96,8 @@
   var meta = null, bars = [], forming = null, byTime = {}, loading = false, retryTimer = null, restarting = false, update = null;
   var lastFullLoad = 0, qTimer = null, lastRows = [];
   var save = function(){ sizes[market] = size; try { localStorage.setItem('dollarbars', JSON.stringify({market:market, mode:mode, sizes:sizes, tf:tf, log:logScale})); } catch (e) {} };
-  var fmtD = function(x){ return x >= 1e9 ? '$' + (x >= 1e10 ? (x/1e9).toFixed(0) : (x/1e9).toFixed(1)) + 'B' : x >= 1e6 ? '$' + (x >= 1e7 ? (x/1e6).toFixed(0) : (x/1e6).toFixed(1)) + 'M' : '$' + Math.round(x/1e3) + 'K'; };
-  var fmtP = function(p){ return p >= 1000 ? p.toLocaleString('en-US',{maximumFractionDigits:0}) : p >= 1 ? p.toFixed(p >= 100 ? 1 : 2) : p.toPrecision(4); };
+  var fmtD = function(x){ return x >= 1e9 ? '$' + (x >= 1e10 ? (x/1e9).toFixed(0) : (x/1e9).toFixed(1)) + 'B' : x >= 1e6 ? '$' + (x >= 1e7 ? (x/1e6).toFixed(0) : (x/1e6).toFixed(1)) + 'M' : x >= 1e4 ? '$' + Math.round(x/1e3) + 'K' : x >= 1e3 ? '$' + (x/1e3).toFixed(1) + 'K' : '$' + Math.round(x); };
+  var fmtP = function(p){ if (p < 0) return '-' + fmtP(-p); if (p >= 1000) return p.toLocaleString('en-US',{maximumFractionDigits:0}); if (p >= 1) return p.toFixed(p >= 100 ? 1 : 2); if (!(p > 0)) return String(p); return p.toFixed(Math.min(20, 3 - Math.floor(Math.log10(p)))); };
   var fmtT = function(t){ return new Date(t*1000).toISOString().slice(0,16).replace('T',' ') + 'Z'; };
   var fmtDay = function(t){ return new Date(t*1000).toISOString().slice(0,10); };
   var fmtMon = function(ms){ return new Date(ms).toISOString().slice(0,7); };
@@ -126,10 +126,10 @@
   $('bLog').className = logScale ? 'on' : '';
 
   function candle(r){ return {time:r.t, open:r.o, high:r.h, low:r.l, close:r.c}; }
-  function precisionFor(px){ var p = px >= 1000 ? 0 : px >= 10 ? 2 : px >= 0.1 ? 4 : px >= 0.001 ? 6 : 8; series.applyOptions({priceFormat:{type:'price',precision:p,minMove:Math.pow(10,-p)}}); }
+  function precisionFor(px){ var p = px >= 1000 ? 0 : px >= 10 ? 2 : px >= 0.1 ? 4 : px >= 0.001 ? 6 : px >= 1e-5 ? 8 : px >= 1e-7 ? 10 : 12; series.applyOptions({priceFormat:{type:'price',precision:p,minMove:Math.pow(10,-p)}}); }
   function setStatus(m, note){
     var s = $('status'); s.className = m.sync === 'live' ? 'live' : (m.sync === 'backfilling' || m.sync === 'loading' || m.sync === 'queued') ? 'busy' : '';
-    var txt = note || (m.sync === 'live' && m.live_err ? 'live (last poll failed: ' + m.live_err + ')' : m.sync);
+    var txt = note || (m.live_err && (m.sync || '').indexOf('failed') !== 0 ? m.sync + (m.sync === 'live' ? ' (last poll failed: ' : ' (last download attempt failed: ') + m.live_err + ', retrying)' : m.sync);
     s.querySelector('span').textContent = txt + (m.last ? ' · last candle ' + fmtT(m.last).slice(11) : '') +
       (m.updated ? ' · checked ' + new Date(m.updated*1000).toISOString().slice(11,19) + 'Z' : '');
     var pr = $('prog');
@@ -181,7 +181,8 @@
       if (j.error) { setStatus({sync:'error'}, j.error); $('empty').textContent = j.error; $('empty').className = 'show'; return; }
       meta = j.meta; setStatus(meta); setTicker(meta.market); checkUpdate(meta);
       if (!Object.keys(j.keys).length) {
-        $('empty').textContent = meta.sync.indexOf('failed') === 0 ? meta.sync : (meta.sync === 'backfilling' ? 'first candles arriving…' : 'waiting for the server to load ' + (meta.market.ticker || mk) + '…');
+        $('empty').textContent = meta.sync.indexOf('failed') === 0 ? meta.sync : (meta.sync === 'backfilling' ? 'first candles arriving…' : 'waiting for the server to load ' + (meta.market.ticker || mk) + '…') +
+          (meta.live_err ? ' — last attempt failed: ' + meta.live_err + ' (retrying)' : '');
         $('empty').className = 'show'; $('stats').textContent = '';
         if (meta.sync.indexOf('failed') !== 0) scheduleRetry();
         return;
@@ -195,7 +196,7 @@
       $('foot').textContent = meta.source + ', ' + fmtDay(meta.first) + ' → now. A dollar bar closes with the minute that brings its turnover to the chosen size, so each holds the size plus that minute\'s overflow. ' +
         'The x-axis is bar order, not the clock: every bar is the same width however long it took. Bar times are open times.';
       render(reset);
-    }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; });
+    }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; if (mk !== market) load(true); });   // the user moved on meanwhile: load what they want now
   }
   function poll(){
     if (restarting) return;
@@ -208,7 +209,10 @@
       if (!k) { if (Object.keys(j.keys).length) load(true); return; }         // this size no longer exists (rebuilt after catch-up): reload
       if (j.meta.sync === 'backfilling') { if (Date.now() - lastFullLoad > 15000) load(false); return; }   // history is growing: refresh the whole set now and then
       if (k.n > bars.length + 1) return load(false);                          // missed more than one bar (laptop slept?): reload
-      if (k.n === bars.length + 1) { var b = k.tail[k.tail.length-1]; bars.push(b); byTime[b.t] = b; series.update(candle(b)); }
+      if (k.n === bars.length + 1) {
+        if (bars.length && k.tail.length > 1 && !sameBar(k.tail[0], bars[bars.length-1])) return load(false);   // the previous bar was re-cut while we were not looking
+        var b = k.tail[k.tail.length-1]; bars.push(b); byTime[b.t] = b; series.update(candle(b));
+      }
       else if (k.n === bars.length && k.n && !sameBar(k.tail[k.tail.length-1], bars[k.n-1])) {   // last bar re-cut with its fuller final minute
         var r = k.tail[k.tail.length-1]; bars[k.n-1] = r; byTime[r.t] = r; series.update(candle(r));
       }
@@ -219,7 +223,7 @@
   }
 
   // ticker picker: type, see spot/perp markets grouped by ticker with how far back each goes; Enter = deepest of the first group
-  function openPicker(){ $('picker').className = 'show'; $('q').value = ''; $('q').focus(); runSearch(''); }
+  function openPicker(){ $('picker').className = 'show'; $('q').value = ''; lastRows = []; $('res').innerHTML = ''; $('q').focus(); runSearch(''); }
   function closePicker(){ $('picker').className = ''; }
   $('tick').onclick = openPicker;
   $('picker').onclick = function(e){ if (e.target === this) closePicker(); };
@@ -227,7 +231,7 @@
     if (e.key === 'Escape') closePicker();
     else if (e.key === '/' && $('picker').className !== 'show' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') { e.preventDefault(); openPicker(); }
   });
-  $('q').oninput = function(){ clearTimeout(qTimer); var v = this.value; qTimer = setTimeout(function(){ runSearch(v); }, 150); };
+  $('q').oninput = function(){ clearTimeout(qTimer); lastRows = []; var v = this.value; qTimer = setTimeout(function(){ runSearch(v); }, 150); };
   $('q').onkeydown = function(e){
     if (e.key !== 'Enter') return;
     e.preventDefault();
@@ -236,7 +240,7 @@
     if (!v) return;
     $('res').innerHTML = '<div class="hint">checking which market has the most history…</div>';
     fetch('/pick?t=' + encodeURIComponent(v)).then(function(r){ return r.json(); }).then(function(j){
-      if (j.key) go(j.key); else $('res').innerHTML = '<div class="hint">nothing on Bybit called "' + esc(v) + '"</div>';
+      if (j.key) go(j.key); else $('res').innerHTML = '<div class="hint">' + (j.status && j.status !== 'ok' ? esc(j.status) : 'nothing on Bybit called "' + esc(v) + '"') + '</div>';
     }).catch(function(){ $('res').innerHTML = '<div class="hint">server not answering</div>'; });
   };
   function runSearch(v){
@@ -295,9 +299,12 @@
     if (!update) return;
     if (update.kind === 'reload') { location.reload(); return; }
     restarting = true; $('bannerText').textContent = 'Restarting the server…'; $('bannerBtn').disabled = true; setStatus({sync:'restarting…'});
-    var oldPid = null, t0 = Date.now();
-    fetch('/restart').then(function(r){ return r.json(); }).then(function(j){ oldPid = j.pid; }).catch(function(){});
-    var iv = setInterval(function(){
+    var oldPid = null, t0 = Date.now(), iv = null;
+    fetch('/restart').then(function(r){ return r.json(); }).then(function(j){
+      if (j.ok) { oldPid = j.pid; return; }
+      clearInterval(iv); restarting = false; $('bannerBtn').disabled = false; $('bannerText').textContent = 'Not yet: ' + (j.reason || 'try again in a minute');   // files still changing on disk
+    }).catch(function(){});
+    iv = setInterval(function(){
       fetch('/ping', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(j){
         if (j.ok && oldPid !== null && j.pid !== oldPid) { clearInterval(iv); location.reload(); }   // the new copy answers: reload onto it
         else if (Date.now() - t0 > 90000) { clearInterval(iv); $('bannerText').textContent = 'The server did not come back. Close this window and run launch.cmd again.'; }

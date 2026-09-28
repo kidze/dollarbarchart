@@ -88,6 +88,42 @@ def test_time_bar_period_starts():
     assert all(b["n"] <= 60 for b in bars)
 
 
+def test_live_poll_recuts_a_bar_closed_on_a_partial_minute():
+    """The live poller sends [K-1, K final, K+1 forming] in one upsert after K was first seen partial: the bar
+    that closed on partial K must be cut again with the full K, exactly as a fresh build would."""
+    df = synthetic(20_000, seed=5)
+    rows = df.to_numpy().tolist()
+    head = 15_000
+    cd = B.Candles(df.iloc[:head])
+    sets, _ = B.build_all(cd)
+    for i in range(head, len(rows) - 1):
+        partial = list(rows[i]); partial[6] *= 0.2; partial[2] = max(partial[1], partial[4]); partial[3] = min(partial[1], partial[4])
+        cd.upsert([partial])                                     # minute i, forming
+        B.update_all(sets, cd)
+        nxt = list(rows[i + 1]); nxt[6] *= 0.1
+        cd.upsert([rows[i - 1], rows[i], nxt])                   # the next poll: i final, i+1 forming
+        B.update_all(sets, cd)
+        cd.upsert([rows[i + 1]])
+        B.update_all(sets, cd)
+    full = B.Candles(df)
+    for k, s in sets.items():
+        bars, forming, _ = B.dollar_bars(full, s["size"]) if k.startswith("d:") else B.time_bars(full, s["tf"])
+        assert s["bars"] == bars, k
+        assert s["forming"] == forming, k
+
+
+def test_size_keys_match_the_page():
+    """The page builds its key as 'd:' + size with JS number formatting; the server must agree for every size."""
+    for auto in (1.5, 37.0, 1.5e6, 5.5e9):
+        sizes = B.sizes_for(auto)
+        keys = [B.size_key(s) for s in sizes]
+        assert len(set(keys)) == len(sizes), keys
+        for s, k in zip(sizes, keys):
+            js = str(int(s)) if s == int(s) else repr(s)
+            assert k == "d:" + js, (s, k)
+    assert B.size_key(5.5e9) == "d:5500000000" and B.size_key(0.75) == "d:0.75"
+
+
 def test_upsert_replaces_same_minute_and_ignores_older():
     df = synthetic(100, seed=4)
     cd = B.Candles(df)

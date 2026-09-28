@@ -31,6 +31,7 @@ class Candles:
         self.v = np.zeros(self.cap); self.v[:n] = df["volume"].to_numpy(float)
         self.d = np.zeros(self.cap); self.d[:n] = df["turnover"].to_numpy(float)
         self.dirty_from = n                                  # first index not yet written to the parquet
+        self.touched = n                                     # lowest index rewritten since the bar sets were last updated
 
     def _grow(self) -> None:
         self.cap = self.cap + self.cap // 2 + 100_000
@@ -52,6 +53,7 @@ class Candles:
                 self.n += 1
             self.ts[i], self.o[i], self.h[i], self.l[i], self.c[i], self.v[i], self.d[i] = ts, r[1], r[2], r[3], r[4], r[5], r[6]
             self.dirty_from = min(self.dirty_from, i)
+            self.touched = min(self.touched, i)
 
     def frame(self) -> pd.DataFrame:
         n = self.n
@@ -143,7 +145,9 @@ def sizes_for(auto: float) -> list:
 
 
 def size_key(size: float) -> str:
-    return f"d:{int(size)}"
+    """Must equal the page's 'd:' + size (JS Number#toString): whole dollars without '.0', fractions in
+    shortest round-trip form (only markets with a median day under $100 ever have fractional sizes)."""
+    return f"d:{int(size)}" if size == int(size) else f"d:{size!r}"
 
 
 def build_all(cd: Candles) -> tuple[dict, dict]:
@@ -159,18 +163,21 @@ def build_all(cd: Candles) -> tuple[dict, dict]:
         sets["t:" + tf] = {"bars": bars, "forming": forming, "start": st, "tf": tf}
     meta = {"auto_size": auto, "sizes": sizes, "timeframes": TIMEFRAMES,
             "first": int(cd.ts[0] // 1000), "last": int(cd.ts[cd.n - 1] // 1000), "n_candles": int(cd.n)}
+    cd.touched = cd.n
     return sets, meta
 
 
 def update_all(sets: dict, cd: Candles) -> None:
-    """Recompute only from each set's forming bar onward (cheap; called after every live candle)."""
-    last_ts = int(cd.ts[cd.n - 1])
+    """Recompute only from each set's forming bar onward (cheap; called after every live candle).
+    A dollar bar that closed on a candle this upsert rewrote (a minute first seen while still forming) is
+    re-cut with the fuller candle, even when later minutes arrived in the same upsert."""
     for key, s in sets.items():
         if key.startswith("d:"):
-            if s["bars"] and s["bars"][-1]["e"] * 1000 > last_ts:      # closed on the still-forming minute: re-cut it with the fuller minute
+            while s["bars"] and s["start"] - 1 >= cd.touched:    # its closing candle changed: cut it again
                 s["start"] -= s["bars"].pop()["n"]
             bars, forming, st = dollar_bars(cd, s["size"], s["start"])
         else:
             bars, forming, st = time_bars(cd, s["tf"], s["start"])
         s["bars"].extend(bars)
         s["forming"], s["start"] = forming, st
+    cd.touched = cd.n

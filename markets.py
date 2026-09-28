@@ -17,7 +17,7 @@ CACHE = X.DATA / "instruments.json"
 WATCHLIST = X.DATA / "watchlist.json"
 DEFAULT_WATCHLIST = ["BTC", "ETH", "SOL"]
 QUOTES = ("USDT", "USDC")
-ALIASES = {"PUMPFUN": "PUMP"}                     # Bybit base coin -> the ticker people type
+ALIASES = {"PUMPFUN": "PUMP", "SHIB1000": "SHIB"}   # Bybit base coin -> the ticker people type
 REFRESH_S = 86_400
 API = "https://api.bybit.com/v5/market/instruments-info"
 
@@ -118,8 +118,12 @@ def search(rows: list, q: str, limit: int = 60) -> list:
 
 
 def candidates(rows: list, ticker: str) -> list:
+    """Every market a typed ticker can mean: display ticker, raw base, or the base without a 1000x prefix
+    (1000XEC, 10000SATS) — the same names search() matches, so Enter never says "nothing" under a hit."""
     t = ticker.strip().upper()
-    out = [r for r in rows if r["ticker"] == t or r["base"] == t]
+    if not t:
+        return []
+    out = [r for r in rows if t in (r["ticker"], r["base"], _LEAD_DIGITS.sub("", r["base"]))]
     out.sort(key=lambda r: (r["quote"] != "USDT", r["kind"] != "perp"))
     return out
 
@@ -154,7 +158,7 @@ def load_watchlist() -> list:
         try:
             wl = json.loads(WATCHLIST.read_text(encoding="utf-8"))
             if isinstance(wl, list):
-                return [str(t).upper() for t in wl]
+                return [t for t in dict.fromkeys(x.strip().upper() for x in wl if isinstance(x, str)) if t]
         except Exception:
             pass
     return list(DEFAULT_WATCHLIST)
@@ -162,4 +166,6 @@ def load_watchlist() -> list:
 
 def save_watchlist(wl: list) -> None:
     WATCHLIST.parent.mkdir(exist_ok=True)
-    WATCHLIST.write_text(json.dumps(wl, indent=0), encoding="utf-8")
+    tmp = WATCHLIST.with_suffix(".tmp")
+    tmp.write_text(json.dumps(wl, indent=0), encoding="utf-8")
+    tmp.replace(WATCHLIST)

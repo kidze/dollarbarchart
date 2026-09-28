@@ -63,7 +63,24 @@ def test_candidates_and_deepest():
     c = MK.candidates(r, "PUMP")
     assert MK.deepest(c)["key"] == "linear:PUMPFUNUSDT"
     assert MK.deepest(MK.candidates(r, "NVDA")) is None            # depth not probed yet
-    assert MK.candidates(r, "nothing") == []
+    assert MK.candidates(r, "nothing") == [] and MK.candidates(r, "  ") == []
+    assert [x["key"] for x in MK.candidates(r, "pepe")] == ["linear:1000PEPEUSDT", "spot:PEPEUSDT"]   # the 1000x perp counts as PEPE
+    assert [x["key"] for x in MK.candidates(r, "PUMPFUN")] == ["linear:PUMPFUNUSDT"]
+
+
+def test_watchlist_file_is_cleaned_and_atomic(tmp_path=None):
+    import pathlib, tempfile
+    d = pathlib.Path(tempfile.mkdtemp(prefix="dbc-wl-"))
+    old = MK.WATCHLIST
+    try:
+        MK.WATCHLIST = d / "watchlist.json"
+        assert MK.load_watchlist() == MK.DEFAULT_WATCHLIST
+        MK.WATCHLIST.write_text('[" btc", "BTC", null, 3, "", "eth"]', encoding="utf-8")
+        assert MK.load_watchlist() == ["BTC", "ETH"]
+        MK.save_watchlist(["SOL", "BTC"])
+        assert MK.load_watchlist() == ["SOL", "BTC"] and not (d / "watchlist.tmp").exists()
+    finally:
+        MK.WATCHLIST = old
 
 
 if __name__ == "__main__":
