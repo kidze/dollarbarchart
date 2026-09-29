@@ -2,7 +2,10 @@
 
 Serves index.html and JSON on 127.0.0.1:8793. A market ("linear:BTCUSDT", "spot:PUMPUSDT") is loaded
 from its parquet when a page asks for it, caught up to now (first time: a full backfill that the chart
-watches grow), then polled every 5 s so the forming bar moves. One background worker does all downloads,
+watches grow), then polled every 5 s so the forming bar moves. A combined market ("all:BTC") is the sum
+of a ticker's series on every venue that lists it (Bybit, OKX, Coinbase, KuCoin, Bitfinex; see venues.py):
+each venue's candles are downloaded into their own parquet, one venue at a time while the market is on
+screen, and merged into one series whose dollars are the venues' sum. One background worker does all downloads,
 in this order: the market on screen, then the daily instrument-list refresh, then first-candle probes for
 the search index, then the watchlist (data/watchlist.json) so those open instantly next time. Nothing
 runs when no window is open: two minutes after the last page request the worker is told to stop,
@@ -30,9 +33,13 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import pandas as pd
+
 import bars as B
 import bybit_sync as X
+import combined as C
 import markets as MK
+import venues as V
 
 HERE = Path(__file__).resolve().parent
 PORT = int(os.environ.get("DOLLARBARS_PORT", "8793"))         # a dev checkout runs on another port next to the live app
@@ -43,7 +50,8 @@ KEEP_LOADED = 3
 WATCH_STALE_S = 86_400
 QUIET_S = 60                                                     # an update is offered only after the source files stopped changing for this long
 DEFAULT_MARKET = "linear:BTCUSDT"
-SOURCES = ["server.py", "bars.py", "bybit_sync.py", "markets.py", "index.html", "lightweight-charts.js"]
+SOURCES = ["server.py", "bars.py", "bybit_sync.py", "markets.py", "venues.py", "combined.py", "index.html", "lightweight-charts.js"]
+REBUILD_S = 300                                                  # a combined market is re-merged from disk this often while its history grows
 
 STATE = {"markets": {}, "stop": False, "restarting": False, "last_req": time.time(), "started": time.time(),
          "build": {}, "update": None, "candidate": None, "candidate_at": 0.0,
@@ -71,6 +79,23 @@ class Market:
         self.live_err = ""                                       # last live-poll or download error, shown on the page until rows arrive
         self.retry_at = 0.0                                      # a download that failed is retried after a pause
         self.persist_lock = threading.Lock()                     # one writer per market
+        self.venues = None                                       # all:<T> only: the series it is made of (see plan_all)
+        self.live_rows = {}                                      # all:<T> only: each series' last good live rows
+        self.built_at = 0.0                                      # all:<T> only: when the merged series was last rebuilt
+
+    @property
+    def combined(self) -> bool:
+        return self.key.startswith("all:")
+
+
+def parse_key(key: str) -> tuple:
+    """'linear:BTCUSDT' -> ('linear', 'BTCUSDT'); 'all:BTC' -> ('all', 'BTC'). Rejects anything else."""
+    if key.startswith("all:"):
+        t = key[4:]
+        if not t or not t.isalnum() or t != t.upper():
+            raise ValueError(f"bad market key {key!r}")
+        return "all", t
+    return X.parse(key)
 
 
 def log(msg: str) -> None:
@@ -163,7 +188,7 @@ def open_log() -> None:
 
 def touch(key: str) -> Market:
     """The page asked for this market: make sure it exists and mark it as on screen."""
-    X.parse(key)
+    parse_key(key)
     with LOCK:
         m = STATE["markets"].get(key)
         if m is None:
@@ -178,7 +203,10 @@ def on_screen(m: Market, now=None) -> bool:
 
 
 def persist(m: Market) -> None:
-    """Write the market's candles to its parquet (atomic). Serialized per market so two callers never share a .tmp."""
+    """Write the market's candles to its parquet (atomic). Serialized per market so two callers never share a .tmp.
+    A combined market is never written: its parts are, by their own syncs, and it is re-merged from them."""
+    if m.combined:
+        return
     with m.persist_lock:
         with LOCK:
             cd = m.cd
@@ -229,12 +257,15 @@ def evict() -> None:
 
 
 def market_info(key: str) -> dict:
-    category, symbol = X.parse(key)
-    info = {"key": key, "ticker": symbol, "name": "", "kind": "spot" if category == "spot" else "perp",
-            "symbol": symbol, "quote": "", "first": None, "stock": False}
+    category, symbol = parse_key(key)
+    info = {"key": key, "ticker": symbol, "name": "", "kind": "all" if category == "all" else "spot" if category == "spot" else "perp",
+            "symbol": "" if category == "all" else symbol, "quote": "", "first": None, "stock": False}
     idx = STATE["index"]
     if idx:
         for r in idx:
+            if category == "all" and r["ticker"] == symbol:
+                info.update({"name": r["name"], "stock": r["stock"]})
+                break
             if r["key"] == key:
                 info.update({k: r[k] for k in ("ticker", "name", "kind", "symbol", "quote", "first", "stock")})
                 break
@@ -243,13 +274,22 @@ def market_info(key: str) -> dict:
 
 
 def meta_of(m: Market) -> dict:
-    return dict(m.meta, sync=m.sync, progress=m.progress, updated=m.updated, live_err=m.live_err[:120],
-                build=build_tag(STATE["build"]), update=STATE["update"], market=market_info(m.key),
-                index_status=STATE["index_status"], source=source_text(m.key))
+    out = dict(m.meta, sync=m.sync, progress=m.progress, updated=m.updated, live_err=m.live_err[:120],
+               build=build_tag(STATE["build"]), update=STATE["update"], market=market_info(m.key),
+               index_status=STATE["index_status"], source=source_text(m))
+    if m.combined:
+        out["venues"] = [{k: s.get(k) for k in ("label", "status", "pct", "n", "first", "exact")} for s in (m.venues or [])]
+    return out
 
 
-def source_text(key: str) -> str:
-    info = market_info(key)
+def source_text(m: Market) -> str:
+    if m.combined:
+        parts = [s["label"] for s in (m.venues or []) if not s["status"].startswith("absent")]
+        approx = [s["label"] for s in (m.venues or []) if not s.get("exact", True)]
+        return ("ALL venues = " + (" + ".join(parts) if parts else "the venues that list it") +
+                ", 1-minute candles, dollars summed across venues, prices from the first of them that traded the minute" +
+                (f" ({', '.join(approx)} report coin volume only: their dollars = volume × close)" if approx else ""))
+    info = market_info(m.key)
     what = "perpetual" if info["kind"] == "perp" else "spot"
     return f"Bybit {info['symbol']} {what}, 1-minute candles, dollars = exchange-reported turnover"
 
@@ -382,6 +422,8 @@ def preempted(job) -> bool:
 
 
 def sync_market(m: Market, job) -> None:
+    if m.combined:
+        return sync_all(m, job)
     if m.cd is None:
         m.sync = "loading"
         cd = B.Candles(X.load(m.key))
@@ -448,6 +490,225 @@ def sync_market(m: Market, job) -> None:
         log(f"{m.key}: live with {cd.n:,} candles")
     else:
         log(f"{m.key}: backfill paused at {m.progress['at'] if m.progress else '?'}")
+
+
+# ---------------------------------------------------------------- combined markets: all:<TICKER>
+
+def plan_all(ticker: str) -> list:
+    """The series a combined market is made of: one spot and one perp per venue. On Bybit that is the deepest
+    market of each kind whose display ticker is exactly this one (USDT before USDC; 1000x variants are left out
+    because their prices are not the coin's). Each entry tracks its own download: status queued | syncing |
+    done | paused | absent | failed."""
+    series = []
+    exact = [r for r in MK.candidates(STATE["index"] or [], ticker) if r["ticker"] == ticker and r.get("first") != 0]
+    for kind in ("perp", "spot"):
+        rows = [r for r in exact if r["kind"] == kind]
+        if rows:
+            r = min(rows, key=lambda r: (r.get("first") or float("inf"), r["quote"] != "USDT"))
+            series.append({"venue": "bybit", "symbol": r["key"], "kind": kind, "label": f"Bybit {r['symbol']} {kind}",
+                           "exact": True, "list_ms": 0})
+    try:
+        inst = V.load_instruments()
+    except Exception as e:
+        log(f"{ticker}: venue instrument lists failed: {type(e).__name__}: {e}")
+        inst = {}
+    for s in V.markets_for(ticker, inst, MK.ALIASES):
+        v = V.VENUES[s["venue"]]
+        series.append({"venue": s["venue"], "symbol": s["symbol"], "kind": s["kind"], "label": f"{v.title} {s['symbol']}",
+                       "exact": v.exact_dollars, "list_ms": s["list_ms"]})
+    for s in series:
+        s.update(status="queued", pct=None, n=0, first=None)
+    order = {v: i for i, v in enumerate(V.DOWNLOAD_ORDER)}
+    series.sort(key=lambda s: (order.get(s["venue"], 9), s["kind"] != "perp"))
+    return series
+
+
+def series_lock(s: dict):
+    """A Bybit series shares its parquet with the plain market of the same key: write under that market's lock."""
+    if s["venue"] == "bybit":
+        with LOCK:
+            m = STATE["markets"].get(s["symbol"])
+        if m is not None:
+            return m.persist_lock
+    return None
+
+
+def merge_all(m: Market):
+    """Merge every series' parquet, one at a time (a BTC-sized series is ~200 MB in memory), in price priority."""
+    order = {v: i for i, v in enumerate(V.PRIORITY)}
+    acc = None
+    for s in sorted(m.venues, key=lambda s: (order.get(s["venue"], 9), s["kind"] != "perp")):
+        if s["status"].startswith("absent"):
+            continue
+        f = V.load(s["venue"], s["symbol"])
+        if not len(f):
+            continue
+        s["n"], s["first"] = int(len(f)), int(f["ts"].iloc[0])
+        acc = f if acc is None else C.merge([acc, f])
+    return acc
+
+
+def rebuild_all(m: Market) -> None:
+    frame = merge_all(m)
+    cd = B.Candles(frame if frame is not None else pd.DataFrame(columns=X.COLS))
+    sets, meta = (B.build_all(cd) if cd.n else (None, {}))
+    with LOCK:
+        m.cd, m.sets, m.meta, m.built_n = cd, sets, meta, cd.n
+        m.first_ms = int(cd.ts[0]) if cd.n else None
+        m.built_at = m.updated = time.time()
+        m.progress = None
+
+
+def sync_all(m: Market, job) -> None:
+    """One venue at a time: catch its parquet up (first time: its whole history), then fold what arrived into the
+    merged series. A venue whose history grew (a first download, or OKX walking back) means a full re-merge from
+    disk, every REBUILD_S while it downloads so the chart keeps growing; otherwise the new minutes are summed and
+    appended. Venues that fail are skipped this round and retried on the next; venues without the symbol are
+    left out for good."""
+    _, ticker = parse_key(m.key)
+    stop = lambda: preempted(job)
+    if m.venues is None:
+        m.sync = "loading"
+        if STATE["index"] is None:                               # Bybit's list is not in yet (first launch, slow network): plan later
+            m.retry_at = time.time() + 5
+            return
+        m.venues = plan_all(ticker)
+        if not m.venues:
+            m.sync = "failed: no venue lists this ticker"
+            return
+        log(f"{m.key}: {len(m.venues)} series: " + ", ".join(s["label"] for s in m.venues))
+        price_check(m)
+    if m.cd is None:
+        m.sync = "loading"
+        rebuild_all(m)                                           # what is on disk shows at once
+    with LOCK:
+        m.sync = "backfilling"
+        m.live_err = ""
+        last = int(m.cd.ts[m.cd.n - 1]) if m.cd.n else None
+    grew, tails, failed, flushed_at = False, [], 0, 0.0
+    for s in m.venues:
+        if stop():
+            break
+        if s["status"].startswith("absent"):
+            continue
+        s["status"], s["pct"] = "syncing", None
+        st = {"first": s["first"], "growing": s["first"] is None, "rows": []}
+
+        def on_rows(rows, st=st):
+            if last is not None:
+                rows = [r for r in rows if r[0] >= last]
+            if len(st["rows"]) < 50_000:                          # more than that = a real gap: the rebuild below covers it
+                st["rows"].extend(rows)
+
+        def progress(pct, at, s=s, st=st):
+            s["pct"] = round(pct, 1)
+            if st["first"] is not None and at < st["first"]:      # OKX walking its history back
+                st["growing"] = True
+            m.progress = {"pct": s["pct"], "at": int(at // 1000)}
+            m.updated = time.time()
+
+        def checkpoint(st=st):
+            nonlocal grew, flushed_at
+            flushed_at = time.time()
+            if st["growing"] and (m.sets is None or time.time() - m.built_at > REBUILD_S):
+                grew = True
+                rebuild_all(m)                                   # the chart appears at the first write and keeps growing during a long first download
+
+        try:
+            res = V.sync(V.VENUES[s["venue"]], s["symbol"], on_rows=on_rows, progress=progress, stop=stop,
+                         checkpoint=checkpoint, list_ms=s.get("list_ms") or 0, lock=series_lock(s))
+        except LookupError as e:
+            s["status"] = f"absent: {e}"[:160]
+            log(f"{m.key}: {s['label']} left out: {e}")
+            continue
+        except Exception as e:
+            s["status"] = f"failed: {type(e).__name__}"
+            m.live_err = f"{s['label']}: {type(e).__name__}: {e}"
+            failed += 1
+            log(f"{m.key}: {s['label']} failed: {type(e).__name__}: {e}")
+            continue
+        s["n"], s["first"] = res["n"], res["first"]
+        if st["growing"] or (res["first"] is not None and st["first"] is not None and res["first"] < st["first"]):
+            grew = True
+        if last is not None and res["prev_last"] is not None and res["prev_last"] < last - B.MINUTE:
+            grew = True                                          # this venue lagged the merged series: its gap is only on disk
+        if res["result"] == "stopped":
+            s["status"] = "paused"
+            break
+        s["status"] = "done"
+        if len(st["rows"]) >= 50_000:
+            grew = True
+        elif st["rows"]:
+            tails.append(st["rows"])
+    if grew:
+        if flushed_at > m.built_at:                              # (a checkpoint may just have rebuilt from the same files)
+            rebuild_all(m)
+    elif tails:
+        rows = C.merge_rows(tails)
+        with LOCK:
+            cd = m.cd
+            cd.upsert(rows)
+            if m.sets is None:
+                m.sets, m.meta = B.build_all(cd)
+                m.built_n = cd.n
+            else:
+                B.update_all(m.sets, cd)
+                m.meta["last"] = int(cd.ts[cd.n - 1] // 1000)
+                m.meta["n_candles"] = int(cd.n)
+            m.updated = time.time()
+    with LOCK:
+        m.progress = None
+        if stop():
+            log(f"{m.key}: paused")
+        elif m.sets is None:                                     # nothing on any venue yet (network down?): try again in a while
+            m.retry_at = time.time() + 30
+        else:                                                    # live; a venue that failed this round is retried on the next sync
+            m.sync = "live"
+            m.synced = True
+            n_done = sum(1 for s in m.venues if s["status"] == "done")
+            log(f"{m.key}: live with {m.cd.n:,} merged candles from {n_done} series" + (f", {failed} failed" if failed else ""))
+
+
+def price_check(m: Market) -> None:
+    """A ticker means different coins on different exchanges now and then (LIT is Lighter on Bybit, Litentry
+    on KuCoin). One request per series: a venue whose latest price is more than 25% from the first series that
+    answered is left out. A venue that does not answer stays in (its own sync decides)."""
+    ref = None
+    order = {v: i for i, v in enumerate(V.PRIORITY)}
+    for s in sorted(m.venues, key=lambda s: (order.get(s["venue"], 9), s["kind"] != "perp")):
+        try:
+            rows = V.VENUES[s["venue"]].latest(s["symbol"], 2)
+        except Exception as e:
+            log(f"{m.key}: {s['label']} price check skipped: {type(e).__name__}")
+            continue
+        if not rows:
+            continue
+        px = rows[-1][4]
+        if ref is None:
+            ref = (s["label"], px)
+        elif not (0.75 <= px / ref[1] <= 1.25):
+            s["status"] = f"absent: price {px:g} vs {ref[1]:g} on {ref[0]}, another coin with this ticker?"
+            log(f"{m.key}: {s['label']} left out: {s['status']}")
+        time.sleep(0.1)
+
+
+def live_rows_all(m: Market) -> tuple:
+    """Each done series' newest candles (its last good answer if this poll fails, for up to a minute), summed
+    per minute. Returns (rows, error text)."""
+    lists, err, now = [], "", time.time()
+    order = {v: i for i, v in enumerate(V.PRIORITY)}
+    for s in sorted(m.venues or [], key=lambda s: (order.get(s["venue"], 9), s["kind"] != "perp")):
+        if s["status"] != "done":
+            continue
+        try:
+            rows = V.VENUES[s["venue"]].latest(s["symbol"], 3)
+            m.live_rows[s["label"]] = (now, rows)
+        except Exception as e:
+            err = f"{s['label']}: {type(e).__name__}"
+            cached = m.live_rows.get(s["label"])
+            rows = cached[1] if cached and now - cached[0] < 60 else []
+        lists.append(rows)
+    return C.merge_rows(lists), err
 
 
 def scan_batch() -> None:
@@ -558,15 +819,19 @@ def live_loop() -> None:
             if m.sync != "live" or m.cd is None or not on_screen(m, now):
                 continue
             try:
-                rows = X.latest(m.key, 3)
+                err = ""
+                if m.combined:
+                    rows, err = live_rows_all(m)
+                else:
+                    rows = X.latest(m.key, 3)
                 with LOCK:
                     cd = m.cd
                     last = int(cd.ts[cd.n - 1])
-                if rows and rows[-1][0] - last >= X.WINDOW:      # more than one request's worth missed (long sleep): the worker walks it
-                    with LOCK:
+                if rows and rows[-1][0] - last >= (5 * B.MINUTE if m.combined else X.WINDOW):   # missed minutes: the worker walks them
+                    with LOCK:                                   # (a plain market refills a few itself below; the combined one re-syncs its venues)
                         m.sync = "backfilling"
                     continue
-                if rows and rows[0][0] > last + B.MINUTE:
+                if rows and rows[0][0] > last + B.MINUTE and not m.combined:
                     rows = X.fetch(m.key, last, rows[-1][0])     # a few missed minutes: one request refills them
                 with LOCK:
                     cd.upsert(rows)
@@ -574,7 +839,7 @@ def live_loop() -> None:
                     m.meta["last"] = int(cd.ts[cd.n - 1] // 1000)
                     m.meta["n_candles"] = int(cd.n)
                     m.updated = time.time()
-                m.live_err = ""
+                m.live_err = err
             except Exception as e:                               # network blip: keep serving what we have
                 m.live_err = type(e).__name__
 

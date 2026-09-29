@@ -135,14 +135,25 @@
     var pr = $('prog');
     if (m.sync === 'backfilling' && m.progress) {
       pr.className = 'show'; $('progFill').style.width = m.progress.pct + '%'; $('progPct').textContent = m.progress.pct.toFixed(0) + '%';
-      $('progText').textContent = 'downloading minute candles · at ' + fmtDay(m.progress.at) + ' · the chart grows as they arrive';
+      $('progText').textContent = venueText(m) || ('downloading minute candles · at ' + fmtDay(m.progress.at) + ' · the chart grows as they arrive');
     } else if (m.sync === 'queued' || m.sync === 'loading') {
-      pr.className = 'show'; $('progFill').style.width = '0%'; $('progPct').textContent = ''; $('progText').textContent = m.sync === 'loading' ? 'loading candles from disk…' : 'waiting for the downloader…';
+      pr.className = 'show'; $('progFill').style.width = '0%'; $('progPct').textContent = ''; $('progText').textContent = m.sync === 'loading' ? (m.venues ? 'merging the venues on disk…' : 'loading candles from disk…') : 'waiting for the downloader…';
     } else pr.className = '';
+  }
+  function venueText(m){                                        // a combined market: which venue is downloading, how many are done
+    if (!m.venues || !m.venues.length) return '';
+    var cur = null, done = 0, left = 0;
+    m.venues.forEach(function(v){ if (v.status === 'syncing') cur = v; else if (v.status === 'done') done++; else if (v.status === 'queued' || v.status === 'paused' || v.status.indexOf('failed') === 0) left++; });
+    return (cur ? 'downloading ' + cur.label + (m.progress ? ' · at ' + fmtDay(m.progress.at) : '') : 'catching up') +
+      ' · ' + done + ' of ' + (done + left + (cur ? 1 : 0)) + ' venues done · the chart grows as they arrive';
   }
   function setTicker(info){
     if (!info) return;
     $('tName').textContent = info.ticker || market;
+    if (info.kind === 'all') {
+      var have = meta && meta.venues ? meta.venues.filter(function(v){ return v.status.indexOf('absent') !== 0; }).length : 0;
+      $('tSub').textContent = 'all venues' + (have ? ' · ' + have + ' series summed' : '') + (info.name ? ' · ' + info.name : '');
+    } else
     $('tSub').textContent = (info.kind === 'perp' ? 'perp' : 'spot') + ' · Bybit ' + (info.symbol || '') + (info.name ? ' · ' + info.name : '');
     $('star').className = info.watch ? 'on' : ''; $('star').textContent = info.watch ? '★' : '☆';
     document.title = (info.ticker || market) + ' dollar bars';
@@ -222,7 +233,8 @@
     }).catch(function(){ if (!restarting) setStatus({sync:'server not answering'}); });
   }
 
-  // ticker picker: type, see spot/perp markets grouped by ticker with how far back each goes; Enter = deepest of the first group
+  // ticker picker: type, see spot/perp markets grouped by ticker with how far back each goes, plus "all venues" (the sum
+  // of every exchange that lists the ticker); Enter = deepest Bybit market of the first group
   function openPicker(){ $('picker').className = 'show'; $('q').value = ''; lastRows = []; $('res').innerHTML = ''; $('q').focus(); runSearch(''); }
   function closePicker(){ $('picker').className = ''; }
   $('tick').onclick = openPicker;
@@ -260,7 +272,9 @@
             var cls = (r.key === market ? 'cur' : (best && r.key === best.key ? 'best' : ''));
             return '<button data-key="' + esc(r.key) + '" class="' + cls + '">' + r.kind + ' ' + esc(r.symbol) +
               ' <span class="tag">' + (r.first ? 'since ' + fmtMon(r.first) : r.first === 0 ? 'no candles' : 'depth ?') + (best && r.key === best.key ? ' ★ most history' : '') + (r.have ? ' · on disk' : '') + (r.status === 'backfilling' ? ' · downloading' : '') + '</span></button>';
-          }).join('') + '</div></div>';
+          }).join('') +
+          '<button data-key="all:' + esc(g.ticker) + '" class="' + ('all:' + g.ticker === market ? 'cur' : '') + '">all venues <span class="tag">Bybit + OKX + Coinbase + KuCoin + Bitfinex, dollars summed · slow first time</span></button>' +
+          '</div></div>';
       }).join('');
       if (!v && j.pending) html += '<div class="hint">' + j.pending + ' markets still to be depth-checked in the background</div>';
       $('res').innerHTML = html;

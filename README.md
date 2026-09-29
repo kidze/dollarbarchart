@@ -13,6 +13,15 @@ amount of market activity. TradingView does not draw them, so this does.
   history**; the list shows how far back each spot/perp market goes.
 * **Free data, no keys:** Bybit's public 1-minute candles with exchange-reported turnover, from each
   market's first trade to the current minute, polled every 5 s so the forming bar moves.
+* **All venues** (the last row in every picker group): one series per ticker that **sums the dollars
+  traded on Bybit, OKX, Coinbase, KuCoin and Bitfinex** minute by minute, with the deepest history any of
+  them has (Bitfinex BTC/USD starts in 2013, Coinbase in 2015, OKX and KuCoin in 2017–18). Prices come
+  from the first of those that traded the minute (Bybit perp, then spot, OKX, Coinbase…). Each venue is
+  downloaded into its own file while the market is on screen, in order of speed, and the chart is
+  re-merged as they arrive; a ticker that means a different coin on some exchange is left out
+  automatically (its price is checked against the others first). The first download of BTC is long
+  (about 4 hours of open-app time across the five venues; a 2025 coin takes 30–60 minutes), but it
+  resumes across sessions and never runs while the window is closed.
 * Bar sizes from a tenth of the market's median day to ten times it, plus ordinary time bars
   (1h, 4h, 1D, 1W, 1M) on the same chart for comparison.
 * TradingView-style chart (Lightweight Charts): drag the price or time axis to zoom, double-click to reset,
@@ -36,7 +45,8 @@ Needs Python 3.10+ with `numpy`, `pandas` and `pyarrow` (`pip install -r require
 * **By hand:** `python server.py`, then open <http://127.0.0.1:8793/>.
 
 Candles are stored per market in `data/` (about 16 MB per market-year; the full BTC perpetual history is
-~110 MB). `data/watchlist.json` holds the watchlist; edit it or use the ☆ button.
+~110 MB; "all venues" for BTC adds one file per venue, ~500 MB in total). `data/watchlist.json` holds the
+watchlist; edit it or use the ☆ button.
 
 ## How the bars are cut
 
@@ -55,14 +65,29 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 |---|---|
 | `bybit_sync.py` | keyless Bybit v5 kline requests; one parquet per market; streaming, resumable, checkpointed backfill that stops within one request when asked |
 | `markets.py` | instrument index (cached daily), ticker aliases (PUMPFUN → PUMP, NVDAX → NVDA), search ranking, deepest-history choice, watchlist file |
+| `venues.py` | the other exchanges' public 1-minute candles (OKX, KuCoin, Coinbase, Bitfinex; Bybit wrapped alike): instrument lists cached daily, one resumable parquet + sidecar per series, forward paging or OKX's backwards paging |
+| `combined.py` | merges several venues' candles into one series: dollars and coin volume summed per minute, prices from the highest-priority venue that has the minute |
 | `bars.py` | dollar bars and time bars from the candles, incrementally as new minutes arrive; per-market size menu |
 | `server.py` | local HTTP server: `/bars?m=` (full history), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |
 | `index.html` | the chart page and ticker picker |
 | `lightweight-charts.js` | TradingView Lightweight Charts v5.2.1, vendored (Apache-2.0, logo must stay) |
-| `tests/` | bar-cutting and search tests: `python tests/test_bars.py`, `python tests/test_markets.py` (or `pytest`) |
+| `tests/` | bar-cutting, search and venue-sync tests: `python tests/test_bars.py`, `python tests/test_markets.py`, `python tests/test_venues.py` (or `pytest`) |
 
-Market keys are `linear:SYMBOL` (perpetual) or `spot:SYMBOL`; the page keeps the current one in the URL
-hash, so `http://127.0.0.1:8793/#spot:PUMPUSDT` opens that market directly.
+Market keys are `linear:SYMBOL` (perpetual), `spot:SYMBOL`, or `all:TICKER` (every venue summed); the page
+keeps the current one in the URL hash, so `http://127.0.0.1:8793/#spot:PUMPUSDT` or `#all:BTC` opens that
+market directly.
+
+## What "all venues" means, exactly
+
+Coinbase and Bitfinex publish only coin volume per minute, so their dollars are `volume × close`; Bybit,
+OKX and KuCoin report quote turnover. Binance is not included (its public API is rate-limited per IP and
+this machine's other tools share it) and neither is Hyperliquid (it keeps ~5000 candles per timeframe and
+reports no dollar volume). Only one spot and one perpetual per venue are used (the venue's main dollar
+quote: USD on Coinbase/Bitfinex, USDT elsewhere), and Bybit's 1000× contracts (1000PEPE) are left out
+because their prices are not the coin's. A minute that a venue is missing simply contributes nothing.
+During a live session each venue is polled every 5 s; a venue that stops answering keeps its last minute
+for up to a minute and then drops out of the forming bar until it answers again (the next launch re-merges
+everything from disk).
 
 ## Developing without breaking the running app
 
