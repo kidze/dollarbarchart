@@ -88,6 +88,32 @@ def test_bytes_reach_the_disk_before_the_rename():
             assert calls[i - 1][0] == "fsync" and calls[i - 1][1] > 0, calls   # the full .tmp was synced right before
 
 
+def test_concurrent_writers_of_one_file_take_turns():
+    """The server saves instruments.json from the worker, the /pick handler and the watchdog without a common lock;
+    two writes at once must not fail or leave a mix of both, the file must end as one complete version."""
+    import json
+    import threading
+    bodies = [{"spot": [{"symbol": f"{w}{i}"} for i in range(20_000)], "linear": []} for w in "AB"]
+    errors = []
+
+    def writer(raw):
+        for _ in range(25):
+            try:
+                MK.save_cache(raw, {})
+            except Exception as e:
+                errors.append(f"{type(e).__name__}: {e}")
+
+    with TempData():
+        threads = [threading.Thread(target=writer, args=(b,)) for b in bodies]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        final = json.loads(MK.CACHE.read_text(encoding="utf-8"))["raw"]
+    assert not errors, errors[:3]
+    assert final in bodies
+
+
 def test_damaged_files_are_recognised():
     with TempData():
         p = X.path(KEY)

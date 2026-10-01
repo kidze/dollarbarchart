@@ -16,6 +16,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -100,24 +101,32 @@ class Damaged(Exception):
     written, a truncated copy). Retrying will not help: the market has to be downloaded again."""
 
 
+_TURNS = {}                                                      # destination -> lock: writers of one file share its .tmp
+_TURNS_LOCK = threading.Lock()
+
+
 def write_durably(dest: Path, write) -> None:
     """write(f) fills a temporary file next to dest, its bytes are forced to the disk, then it replaces dest.
     A crash or power cut leaves either the old file or the new one. Without the fsync, NTFS can keep the
     rename but lose the data: the file has the right length and a zero-filled end, which is what the
-    2026-09-29 power cut did to the BTC history."""
-    dest.parent.mkdir(exist_ok=True)
-    tmp = dest.with_suffix(".tmp")
-    with open(tmp, "wb") as f:
-        write(f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, dest)
-    if os.name != "nt":                                          # POSIX: the rename itself lasts once the directory is synced
-        fd = os.open(dest.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+    2026-09-29 power cut did to the BTC history. Threads writing the same file take turns, so two saves
+    at once (instruments.json has several writers) cannot rename a mix of both into place."""
+    with _TURNS_LOCK:
+        turn = _TURNS.setdefault(str(dest), threading.Lock())
+    with turn:
+        dest.parent.mkdir(exist_ok=True)
+        tmp = dest.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            write(f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, dest)
+        if os.name != "nt":                                      # POSIX: the rename itself lasts once the directory is synced
+            fd = os.open(dest.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
 
 def load(key: str) -> pd.DataFrame:
