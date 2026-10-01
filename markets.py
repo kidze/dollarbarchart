@@ -147,10 +147,8 @@ def load_cache():
 
 
 def save_cache(raw: dict, first: dict) -> None:
-    CACHE.parent.mkdir(exist_ok=True)
-    tmp = CACHE.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"raw": raw, "first": first}, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(CACHE)
+    body = json.dumps({"raw": raw, "first": first}, separators=(",", ":")).encode("utf-8")
+    X.write_durably(CACHE, lambda f: f.write(body))
 
 
 def load_watchlist() -> list:
@@ -165,7 +163,5 @@ def load_watchlist() -> list:
 
 
 def save_watchlist(wl: list) -> None:
-    WATCHLIST.parent.mkdir(exist_ok=True)
-    tmp = WATCHLIST.with_suffix(".tmp")
-    tmp.write_text(json.dumps(wl, indent=0), encoding="utf-8")
-    tmp.replace(WATCHLIST)
+    body = json.dumps(wl, indent=0).encode("utf-8")
+    X.write_durably(WATCHLIST, lambda f: f.write(body))

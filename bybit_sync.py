@@ -7,8 +7,12 @@ dollar bars need). Backfills stream rows to a callback so the chart can grow whi
 runs, checkpoint every 100 requests, and stop within one request when asked (the app never keeps
 downloading after its window is closed; the next launch resumes where it stopped).
 
+Files are written durably (see write_durably), and a file that a crash damaged anyway is recognised
+(Damaged) so the server can set it aside and download the market again instead of failing on it forever.
+
 Run directly to backfill one market from the command line:  python bybit_sync.py linear:ETHUSDT
 """
+import io
 import json
 import os
 import sys
@@ -91,18 +95,61 @@ def first_candle_ms(key: str, quick: bool = False):
     return rows[0][0] if rows else None
 
 
+class Damaged(Exception):
+    """A market file whose bytes can be read but are not a whole candle file (a power cut while it was being
+    written, a truncated copy). Retrying will not help: the market has to be downloaded again."""
+
+
+def write_durably(dest: Path, write) -> None:
+    """write(f) fills a temporary file next to dest, its bytes are forced to the disk, then it replaces dest.
+    A crash or power cut leaves either the old file or the new one. Without the fsync, NTFS can keep the
+    rename but lose the data: the file has the right length and a zero-filled end, which is what the
+    2026-09-29 power cut did to the BTC history."""
+    dest.parent.mkdir(exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        write(f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, dest)
+    if os.name != "nt":                                          # POSIX: the rename itself lasts once the directory is synced
+        fd = os.open(dest.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 def load(key: str) -> pd.DataFrame:
+    """The market's candles, or an empty frame when it has no file yet. A file that cannot be read right now
+    (held open, disk error) raises OSError, worth retrying; one whose bytes are not a candle file raises Damaged."""
     p = path(key)
-    return pd.read_parquet(p) if p.exists() else pd.DataFrame(columns=COLS)
+    try:
+        raw = p.read_bytes()
+    except FileNotFoundError:
+        return pd.DataFrame(columns=COLS)
+    try:
+        df = pd.read_parquet(io.BytesIO(raw))
+        missing = [c for c in COLS if c not in df.columns]
+        if missing:
+            raise ValueError(f"no {', '.join(missing)} column")
+    except MemoryError:                                          # the machine is short of RAM, not the file's fault
+        raise
+    except Exception as e:                                       # the bytes were read, so the content is what failed
+        raise Damaged(f"{p.name}: {type(e).__name__}: {e}") from e
+    return df
 
 
 def save(key: str, df: pd.DataFrame) -> None:
-    """Atomic write: a crash mid-write leaves the old file intact instead of a truncated one."""
+    write_durably(path(key), lambda f: df.to_parquet(f, index=False))
+
+
+def set_aside(key: str) -> Path:
+    """Move a damaged market file out of the way (replacing an older damaged copy); the market then starts empty."""
     p = path(key)
-    p.parent.mkdir(exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    df.to_parquet(tmp, index=False)
-    os.replace(tmp, p)
+    dest = p.with_name(p.name + ".damaged")
+    os.replace(p, dest)
+    return dest
 
 
 def sync(key: str, on_rows, cursor_ms: int, stop=None, checkpoint=None, pause: float = 0.05) -> str:
