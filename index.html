@@ -135,7 +135,7 @@
     var pr = $('prog');
     if (m.sync === 'backfilling' && m.progress) {
       pr.className = 'show'; $('progFill').style.width = m.progress.pct + '%'; $('progPct').textContent = m.progress.pct.toFixed(0) + '%';
-      $('progText').textContent = 'downloading minute candles · at ' + fmtDay(m.progress.at) + ' · the chart grows as they arrive';
+      $('progText').textContent = (m.notice || 'downloading minute candles') + ' · at ' + fmtDay(m.progress.at) + ' · the chart grows as they arrive';
     } else if (m.sync === 'queued' || m.sync === 'loading') {
       pr.className = 'show'; $('progFill').style.width = '0%'; $('progPct').textContent = ''; $('progText').textContent = m.sync === 'loading' ? 'loading candles from disk…' : 'waiting for the downloader…';
     } else pr.className = '';
@@ -181,7 +181,7 @@
       if (j.error) { setStatus({sync:'error'}, j.error); $('empty').textContent = j.error; $('empty').className = 'show'; return; }
       meta = j.meta; setStatus(meta); setTicker(meta.market); checkUpdate(meta);
       if (!Object.keys(j.keys).length) {
-        $('empty').textContent = meta.sync.indexOf('failed') === 0 ? meta.sync : (meta.sync === 'backfilling' ? 'first candles arriving…' : 'waiting for the server to load ' + (meta.market.ticker || mk) + '…') +
+        $('empty').textContent = meta.sync.indexOf('failed') === 0 ? meta.sync : (meta.notice ? meta.notice + ' · ' : '') + (meta.sync === 'backfilling' ? 'first candles arriving…' : 'waiting for the server to load ' + (meta.market.ticker || mk) + '…') +
           (meta.live_err ? ' — last attempt failed: ' + meta.live_err + ' (retrying)' : '');
         $('empty').className = 'show'; $('stats').textContent = '';
         if (meta.sync.indexOf('failed') !== 0) scheduleRetry();

@@ -69,6 +69,7 @@ class Market:
         self.updated = 0.0
         self.synced = False                                      # reached "now" at least once this session
         self.live_err = ""                                       # last live-poll or download error, shown on the page until rows arrive
+        self.notice = ""                                         # why a market on disk is downloading from scratch (shown until it is live)
         self.retry_at = 0.0                                      # a download that failed is retried after a pause
         self.persist_lock = threading.Lock()                     # one writer per market
 
@@ -243,7 +244,7 @@ def market_info(key: str) -> dict:
 
 
 def meta_of(m: Market) -> dict:
-    return dict(m.meta, sync=m.sync, progress=m.progress, updated=m.updated, live_err=m.live_err[:120],
+    return dict(m.meta, sync=m.sync, progress=m.progress, updated=m.updated, live_err=m.live_err[:120], notice=m.notice,
                 build=build_tag(STATE["build"]), update=STATE["update"], market=market_info(m.key),
                 index_status=STATE["index_status"], source=source_text(m.key))
 
@@ -384,7 +385,14 @@ def preempted(job) -> bool:
 def sync_market(m: Market, job) -> None:
     if m.cd is None:
         m.sync = "loading"
-        cd = B.Candles(X.load(m.key))
+        try:
+            frame = X.load(m.key)
+        except X.Damaged as e:                                   # e.g. cut power mid-write before writes were durable: start over
+            aside = X.set_aside(m.key)
+            log(f"{m.key}: saved candles unreadable ({e}); kept as {aside.name}, downloading again")
+            m.notice = "the saved file was damaged (power cut?), downloading it again"
+            frame = X.load(m.key)
+        cd = B.Candles(frame)
         with LOCK:
             m.cd = cd
             if cd.n:
@@ -445,6 +453,7 @@ def sync_market(m: Market, job) -> None:
             m.progress = None
             m.synced = True
             m.live_err = ""
+            m.notice = ""
         log(f"{m.key}: live with {cd.n:,} candles")
     else:
         log(f"{m.key}: backfill paused at {m.progress['at'] if m.progress else '?'}")

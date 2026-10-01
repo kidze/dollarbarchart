@@ -38,6 +38,11 @@ Needs Python 3.10+ with `numpy`, `pandas` and `pyarrow` (`pip install -r require
 Candles are stored per market in `data/` (about 16 MB per market-year; the full BTC perpetual history is
 ~110 MB). `data/watchlist.json` holds the watchlist; edit it or use the ☆ button.
 
+Every file in `data/` is written to a temporary file, forced to the disk, then swapped in, so a crash or a
+power cut leaves either the old version or the new one. A market file that is damaged anyway (for example
+by a power cut before this was in place) is moved aside as `<name>.parquet.damaged` and the market is
+downloaded again; the chart says so while it happens. The `.damaged` copy can be deleted.
+
 ## How the bars are cut
 
 A dollar bar opens with a 1-minute candle and closes with the candle whose turnover brings the dollars traded
@@ -59,7 +64,7 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 | `server.py` | local HTTP server: `/bars?m=` (full history), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |
 | `index.html` | the chart page and ticker picker |
 | `lightweight-charts.js` | TradingView Lightweight Charts v5.2.1, vendored (Apache-2.0, logo must stay) |
-| `tests/` | bar-cutting and search tests: `python tests/test_bars.py`, `python tests/test_markets.py` (or `pytest`) |
+| `tests/` | bar-cutting, search and crash-safety tests: `python tests/test_bars.py`, `python tests/test_markets.py`, `python tests/test_storage.py` (or `pytest`) |
 
 Market keys are `linear:SYMBOL` (perpetual) or `spot:SYMBOL`; the page keeps the current one in the URL
 hash, so `http://127.0.0.1:8793/#spot:PUMPUSDT` opens that market directly.
