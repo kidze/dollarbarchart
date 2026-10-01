@@ -114,13 +114,30 @@
     layout:{background:{type:'solid',color:'#0b0c0e'},textColor:'#a8adb8',fontSize:Math.round(rem * 12 / 14)},
     grid:{vertLines:{color:'#16181d'},horzLines:{color:'#16181d'}},
     crosshair:{mode:0}, rightPriceScale:{borderColor:'#23262d', mode: logScale ? 1 : 0},
-    timeScale:{borderColor:'#23262d',timeVisible:true,secondsVisible:false,rightOffset:6,barSpacing:8,minBarSpacing:2},
+    timeScale:{borderColor:'#23262d',timeVisible:true,secondsVisible:false,rightOffset:6,barSpacing:8,minBarSpacing:2,
+      enableConflation:true},   // bars thinner than a pixel are drawn merged: a fully zoomed-out 57k-bar chart repaints in ~3 ms instead of ~34
     localization:{priceFormatter:fmtP}
   });
   var series = chart.addSeries(LC.CandlestickSeries, {upColor:'#2ebd85',downColor:'#f23645',wickUpColor:'#2ebd85',wickDownColor:'#f23645',borderVisible:false,
     priceFormat:{type:'price',precision:2,minMove:0.01}});
   var scale = chart.priceScale('right');
   new ResizeObserver(function(){ chart.applyOptions({width:$('chart').clientWidth, height:$('chart').clientHeight}); }).observe($('chart'));
+
+  // How far you can zoom out: until the whole history fits on screen. Short histories keep the 2 px floor (zooming out further would only add empty space).
+  var minSpacing = 2;
+  function fitLimit(){
+    var n = bars.length + (forming ? 1 : 0), w = chart.timeScale().width();
+    var m = n && w ? Math.min(2, w / (n + chart.timeScale().options().rightOffset)) : 2;
+    if (m !== minSpacing) { minSpacing = m; chart.applyOptions({timeScale:{minBarSpacing:m}}); }
+  }
+  chart.timeScale().subscribeSizeChange(fitLimit);
+  // Mouse-wheel zoom out while the newest bar is on screen keeps it pinned at the right edge, so history is added on the left
+  // until all of it fits. Zooming in, or out while scrolled back into history, centres on the mouse as before. Runs before the chart's own handler.
+  var pinned = false;
+  $('chart').addEventListener('wheel', function(e){
+    var r = chart.timeScale().getVisibleLogicalRange(), pin = e.deltaY > 0 && !!r && r.to >= bars.length + (forming ? 1 : 0) - 1;
+    if (pin !== pinned) { pinned = pin; chart.applyOptions({timeScale:{rightBarStaysOnScroll:pin}}); }
+  }, {capture:true, passive:true});
 
   // A / L buttons on the price axis, like TradingView. Dragging the axis switches auto scale off; A puts it back.
   $('bAuto').onclick = function(){ scale.applyOptions({autoScale: !scale.options().autoScale}); };
@@ -170,7 +187,7 @@
     var data = bars.map(candle);
     if (forming) { byTime[forming.t] = forming; data.push(candle(forming)); }
     if (data.length) precisionFor(data[data.length-1].close);
-    series.setData(data);
+    series.setData(data); fitLimit();
     if (reset) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0, data.length - 260), to:data.length + 4}); scale.applyOptions({autoScale:true}); }
     stats();
   }
@@ -221,7 +238,7 @@
       }
       forming = k.forming;
       if (forming) { byTime[forming.t] = forming; series.update(candle(forming)); }
-      stats();
+      fitLimit(); stats();
     }).catch(function(){ if (!restarting) setStatus({sync:'server not answering'}); });
   }
 
