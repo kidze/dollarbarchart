@@ -18,11 +18,15 @@ reloads by itself.
   /search?q=    markets matching what was typed (empty q = the watchlist)
   /pick?t=      resolve a ticker to the market with the most history (probes depth if unknown)
   /watchlist?add=T | ?remove=T
+  /drawings?m=  the market's saved drawings (GET), or replace them (POST {"drawings": [...]})
+  /settings     the chart's saved look (GET), or replace it (POST {"settings": {...}})
+  /static/<f>   the page's scripts and styles
   /ping, /restart
 """
 import http.server
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -33,6 +37,7 @@ from urllib.parse import parse_qs, urlparse
 import bars as B
 import bybit_sync as X
 import markets as MK
+import userdata as U
 
 HERE = Path(__file__).resolve().parent
 PORT = int(os.environ.get("DOLLARBARS_PORT", "8793"))         # a dev checkout runs on another port next to the live app
@@ -43,7 +48,9 @@ KEEP_LOADED = 3
 WATCH_STALE_S = 86_400
 QUIET_S = 60                                                     # an update is offered only after the source files stopped changing for this long
 DEFAULT_MARKET = "linear:BTCUSDT"
-SOURCES = ["server.py", "bars.py", "bybit_sync.py", "markets.py", "index.html", "lightweight-charts.js"]
+CORE = ["server.py", "bars.py", "bybit_sync.py", "markets.py", "userdata.py", "index.html", "lightweight-charts.js"]
+STATIC = HERE / "static"
+PAGE_TYPES = {".js": "application/javascript", ".css": "text/css"}
 
 STATE = {"markets": {}, "stop": False, "restarting": False, "last_req": time.time(), "started": time.time(),
          "build": {}, "update": None, "candidate": None, "candidate_at": 0.0,
@@ -80,9 +87,18 @@ def log(msg: str) -> None:
 
 # ---------------------------------------------------------------- update detection / restart
 
+def sources() -> list:
+    """The files whose change is an update: the server's modules, the page, and everything the page loads from static/."""
+    try:
+        extra = sorted("static/" + p.name for p in STATIC.iterdir() if p.suffix in PAGE_TYPES)
+    except OSError:
+        extra = []
+    return CORE + extra
+
+
 def build_id() -> dict:
     out = {}
-    for f in SOURCES:
+    for f in sources():
         p = HERE / f
         try:
             st = p.stat()
@@ -112,7 +128,7 @@ def check_update() -> None:
         return
     if now - STATE["candidate_at"] < QUIET_S:
         return
-    changed = [f for f in SOURCES if b.get(f) != STATE["build"].get(f)]
+    changed = [f for f in dict.fromkeys(list(STATE["build"]) + list(b)) if b.get(f) != STATE["build"].get(f)]
     kind = "restart" if any(f.endswith(".py") for f in changed) else "reload"
     if STATE["update"] is None or STATE["update"]["files"] != changed:
         log(f"update available ({kind}): {', '.join(changed)}")
@@ -125,11 +141,13 @@ def update_settled() -> bool:
 
 
 def page_served() -> None:
-    """The page just loaded the current index.html + chart library, so those no longer count as pending updates."""
+    """The page just loaded the current index.html and its scripts, so those no longer count as pending updates."""
     b = build_id()
-    for f in SOURCES:
-        if not f.endswith(".py") and f in b:
-            STATE["build"][f] = b[f]
+    for f in [f for f in STATE["build"] if not f.endswith(".py") and f not in b]:
+        del STATE["build"][f]
+    for f, v in b.items():
+        if not f.endswith(".py"):
+            STATE["build"][f] = v
     check_update()
 
 
@@ -644,6 +662,16 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self.send(200, body, "text/html")
             if p == "/lightweight-charts.js":
                 return self.send(200, (HERE / "lightweight-charts.js").read_bytes(), "application/javascript")
+            if p.startswith("/static/"):
+                name = p[len("/static/"):]
+                f = STATIC / name
+                if not re.fullmatch(r"[a-z0-9_-]+\.(js|css)", name) or not f.is_file():
+                    return self.js({"error": "not found"}, 404)
+                return self.send(200, f.read_bytes(), PAGE_TYPES[f.suffix])
+            if p == "/drawings":
+                return self.js({"drawings": U.get_drawings(q.get("m", [DEFAULT_MARKET])[0])})
+            if p == "/settings":
+                return self.js({"settings": U.get_settings()})
             if p == "/ping":
                 if STATE["stop"]:                                # winding down: a launcher must start a fresh copy
                     return self.js({"ok": False, "stopping": True, "pid": os.getpid()}, 503)
@@ -693,6 +721,37 @@ class H(http.server.BaseHTTPRequestHandler):
             self.js({"error": str(e)}, 400)
         except Exception as e:
             log(f"request {self.path} failed: {type(e).__name__}: {e}")
+            self.js({"error": f"{type(e).__name__}: {e}"}, 500)
+
+    def do_POST(self):
+        STATE["last_req"] = time.time()
+        u = urlparse(self.path)
+        p, q = u.path, parse_qs(u.query)
+        try:
+            # Only this app's own page may write: another site open in the browser could otherwise post here.
+            # A JSON content type cannot be sent cross-site without a CORS preflight, which this server never grants.
+            origin = self.headers.get("Origin")
+            if origin and origin not in (f"http://127.0.0.1:{PORT}", f"http://localhost:{PORT}"):
+                return self.js({"error": "forbidden"}, 403)
+            if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                return self.js({"error": "send application/json"}, 415)
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > U.MAX_BODY:
+                return self.js({"error": "too large"}, 413)
+            body = json.loads(self.rfile.read(n) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("send a JSON object")
+            if p == "/drawings":
+                U.put_drawings(q.get("m", [""])[0], body.get("drawings"))
+                return self.js({"ok": True})
+            if p == "/settings":
+                U.put_settings(body.get("settings"))
+                return self.js({"ok": True})
+            self.js({"error": "not found"}, 404)
+        except ValueError as e:
+            self.js({"error": str(e)}, 400)
+        except Exception as e:
+            log(f"request POST {self.path} failed: {type(e).__name__}: {e}")
             self.js({"error": f"{type(e).__name__}: {e}"}, 500)
 
     def decorate(self, rows: list) -> list:
