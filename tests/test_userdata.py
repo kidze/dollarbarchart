@@ -36,42 +36,70 @@ class TempData:
 
 def test_drawings_round_trip_survive_a_restart():
     with TempData() as d:
-        assert U.get_drawings(KEY) == []                         # nothing saved yet: empty, not an error
-        U.put_drawings(KEY, [LINE])
-        U.put_drawings("spot:OTHERUSDT", [dict(LINE, id="b2")])
+        items, rev0 = U.get_drawings(KEY)
+        assert items == []                                       # nothing saved yet: empty, not an error
+        prev, rev1 = U.change_drawings(KEY, [LINE], [])
+        assert prev == rev0 and rev1 != rev0
+        U.change_drawings("spot:OTHERUSDT", [dict(LINE, id="b2")], [])
         U.forget()                                               # what a server restart sees: only the file
-        assert U.get_drawings(KEY) == [LINE]
-        assert U.get_drawings("spot:OTHERUSDT")[0]["id"] == "b2"
-        U.put_drawings(KEY, [])                                  # the last drawing deleted: the market leaves the file
+        assert U.get_drawings(KEY)[0] == [LINE]
+        assert U.get_drawings("spot:OTHERUSDT")[0][0]["id"] == "b2"
+        assert U.get_drawings(KEY)[1] != rev1                    # a new server never claims an old revision
+        U.change_drawings(KEY, [], ["a1"])                       # the last drawing deleted: the market leaves the file
         U.forget()
-        assert U.get_drawings(KEY) == [] and KEY not in json.loads((d / "drawings.json").read_text())
+        assert U.get_drawings(KEY)[0] == [] and KEY not in json.loads((d / "drawings.json").read_text())
         assert sorted(p.name for p in d.iterdir()) == ["drawings.json"]   # no .tmp left behind
+
+
+def test_two_windows_never_wipe_each_other():
+    """Each window sends only what it changed, so a window with an old copy cannot delete what another one drew."""
+    with TempData():
+        _, rev_a = U.get_drawings(KEY)                           # both windows open the market while it is empty
+        _, rev_b = U.get_drawings(KEY)
+        prev, rev_a = U.change_drawings(KEY, [LINE], [])         # window A draws a line
+        assert prev == rev_b                                     # (B has not seen it)
+        moved = dict(LINE, id="b2", points=[{"t": 1, "p": 2}, {"t": 3, "p": 4}])
+        prev, rev_b = U.change_drawings(KEY, [moved], [])        # window B, still holding its empty copy, draws another
+        assert prev == rev_a and prev != U.get_drawings(KEY)[1]  # B can tell someone else changed the list in between
+        assert [x["id"] for x in U.get_drawings(KEY)[0]] == ["a1", "b2"]
+        restyled = dict(LINE, style={"color": "rgba(1,2,3,1)", "width": 3})
+        U.change_drawings(KEY, [restyled], [])                   # an edit replaces that drawing only, in place
+        assert U.get_drawings(KEY)[0] == [restyled, moved]
+        U.change_drawings(KEY, [], ["b2", "never-saved"])        # deleting an id nobody has is harmless
+        assert U.get_drawings(KEY)[0] == [restyled]
+        before = U.get_drawings(KEY)[1]
+        assert U.change_drawings(KEY, [], []) == (before, before)   # an empty change is not a change
 
 
 def test_bad_drawings_are_refused_and_change_nothing():
     with TempData():
-        U.put_drawings(KEY, [LINE])
-        for key, value in [("../../etc", [LINE]), ("", [LINE]), (KEY, {"not": "a list"}), (KEY, ["text"]),
-                           (KEY, [LINE] * (U.MAX_DRAWINGS + 1))]:
+        U.change_drawings(KEY, [LINE], [])
+        many = [dict(LINE, id=f"x{i}") for i in range(U.MAX_DRAWINGS)]
+        for key, up, dl in [("../../etc", [LINE], []), ("", [LINE], []), (KEY, {"not": "a list"}, []), (KEY, ["text"], []),
+                            (KEY, [dict(LINE, id="../x")], []), (KEY, [{"no": "id"}], []), (KEY, [], "a1"), (KEY, [], [1]),
+                            (KEY, many, [])]:
             try:
-                U.put_drawings(key, value)
+                U.change_drawings(key, up, dl)
             except ValueError:
                 pass
             else:
-                raise AssertionError(f"accepted {key!r}")
+                raise AssertionError(f"accepted {key!r} {str(up)[:40]} {dl!r}")
         U.forget()
-        assert U.get_drawings(KEY) == [LINE]
+        assert U.get_drawings(KEY)[0] == [LINE]
 
 
-def test_settings_round_trip():
+def test_settings_merge_by_key():
     with TempData():
         assert U.get_settings() == {}
-        s = {"appearance": {"bg": {"type": "solid", "color": "rgba(19,23,34,0.9)"}, "body": {"show": True}}}
-        U.put_settings(s)
+        look = {"bg": {"type": "solid", "color": "rgba(19,23,34,0.9)"}, "body": {"show": True}}
+        U.change_settings({"appearance": look})
+        U.change_settings({"drawUi": {"lock": True}})            # another window saves another key: both kept
         U.forget()
-        assert U.get_settings() == s
+        assert U.get_settings() == {"appearance": look, "drawUi": {"lock": True}}
+        U.change_settings({"drawUi": None})                      # null removes a key
+        assert U.get_settings() == {"appearance": look}
         try:
-            U.put_settings(["no"])
+            U.change_settings(["no"])
         except ValueError:
             pass
         else:
@@ -81,11 +109,11 @@ def test_settings_round_trip():
 def test_damaged_file_is_set_aside_not_fatal():
     with TempData() as d:
         (d / "drawings.json").write_bytes(b"\x00" * 64)          # what a power cut leaves
-        assert U.get_drawings(KEY) == []
+        assert U.get_drawings(KEY)[0] == []
         assert (d / "drawings.json.damaged").exists()
-        U.put_drawings(KEY, [LINE])                              # and saving works again
+        U.change_drawings(KEY, [LINE], [])                       # and saving works again
         U.forget()
-        assert U.get_drawings(KEY) == [LINE]
+        assert U.get_drawings(KEY)[0] == [LINE]
 
 
 def test_http_routes():
@@ -109,16 +137,20 @@ def test_http_routes():
             except urllib.error.HTTPError as e:
                 return e.code, json.loads(e.read() or b"{}")
         try:
-            assert call(f"/drawings?m={KEY}", {"drawings": [LINE]}) == (200, {"ok": True})
-            assert call(f"/drawings?m={KEY}") == (200, {"drawings": [LINE]})
+            st, j = call(f"/drawings?m={KEY}")
+            assert st == 200 and j["drawings"] == [] and j["rev"]
+            st, j2 = call(f"/drawings?m={KEY}", {"upsert": [LINE]})
+            assert st == 200 and j2["ok"] and j2["prev"] == j["rev"] and j2["rev"] != j["rev"]
+            assert call(f"/drawings?m={KEY}") == (200, {"drawings": [LINE], "rev": j2["rev"]})
             assert call("/settings", {"settings": {"appearance": {"x": 1}}})[0] == 200
-            assert call("/settings") == (200, {"settings": {"appearance": {"x": 1}}})
-            # another website open in the same browser must not be able to overwrite them
-            assert call(f"/drawings?m={KEY}", {"drawings": []}, {"Origin": "https://evil.example"})[0] == 403
-            assert call(f"/drawings?m={KEY}", raw=b'{"drawings": []}', headers={"Content-Type": "text/plain"})[0] == 415
+            assert call("/settings", {"settings": {"drawUi": {"y": 2}}})[0] == 200
+            assert call("/settings") == (200, {"settings": {"appearance": {"x": 1}, "drawUi": {"y": 2}}})
+            # another website open in the same browser must not be able to change them
+            assert call(f"/drawings?m={KEY}", {"delete": ["a1"]}, {"Origin": "https://evil.example"})[0] == 403
+            assert call(f"/drawings?m={KEY}", raw=b'{"delete": ["a1"]}', headers={"Content-Type": "text/plain"})[0] == 415
             assert call(f"/drawings?m={KEY}", raw=b"not json")[0] == 400
-            assert call("/drawings?m=bad%20key", {"drawings": [LINE]})[0] == 400
-            assert call(f"/drawings?m={KEY}") == (200, {"drawings": [LINE]})   # none of that changed anything
+            assert call("/drawings?m=bad%20key", {"upsert": [LINE]})[0] == 400
+            assert call(f"/drawings?m={KEY}") == (200, {"drawings": [LINE], "rev": j2["rev"]})   # none of that changed anything
             for bad in ["/static/../server.py", "/static/%2e%2e/server.py", "/static/nope.js", "/static/x.py"]:
                 assert call(bad)[0] == 404, bad
             assert all(f in S.sources() for f in ("userdata.py", "index.html"))

@@ -24,9 +24,9 @@
     var chart = app.chart, series = app.series, ts = chart.timeScale(), store = app.store, host = $('chart');
     var ui = Object.assign({stay:false, lock:false, hide:false, dtb:null}, store.get('drawUi') || {});
     var defaults = Object.assign({}, BASE_STYLE, (store.get('drawDefaults') || {}).trendline || {});
-    var items = [], marketKey = null, loadSeq = 0;
+    var items = [];
     var tool = 'cursor', selected = null, hover = null, placing = null, drag = null, shift = false, lastMove = null;
-    var undo = [], redo = [], saveTimer = null, pendingSave = null, lastDown = null;
+    var undo = [], redo = [], lastDown = null;
     var colors = {get: function(){ return store.get('customColors') || []; }, set: function(l){ store.set('customColors', l); }};
 
     // ------------------------------------------------------------ geometry: anchors {t, p} <-> pane pixels
@@ -91,7 +91,7 @@
       var lines = String(text).split('\n'), lh = fontPx() * 1.25, pad = 5;
       var w = Math.max.apply(null, lines.map(function(t){ return ctx.measureText(t).width; })) + pad*2, hh = lines.length * lh + pad;
       var bx = alignRight ? x - w - 8 : x + 8, by = above ? y - hh - 8 : y + 8;
-      bx = Math.max(2, Math.min(size.width - w - 2, bx)); by = Math.max(2, Math.min(size.height - hh - 2, by));   // stay inside the pane
+      bx = Math.max(2, Math.min(size.width - w - 2, bx)); by = Math.max(2, Math.min(size.height - hh - 2, by));   // an end near the edge: the box stays inside
       ctx.fillStyle = bg; roundRect(ctx, bx, by, w, hh, 4); ctx.fill();
       ctx.fillStyle = fg; ctx.textBaseline = 'top';
       lines.forEach(function(t, i){ ctx.fillText(t, bx + pad, by + pad*0.6 + i*lh + (lh - fontPx())/2); });
@@ -133,13 +133,14 @@
       });
     }
     function paintLabels(ctx, size, list){                       // CSS pixels: text keeps the page's font size
+      function seen(p){ return p.x >= -1 && p.x <= size.width + 1 && p.y >= -1 && p.y <= size.height + 1; }   // labels follow their end off screen
       list.forEach(function(q){
         var d = q.d, s = d.style, a = q.a, b = q.b;
         if (s.labels) {
-          label(ctx, size, app.fmtP(d.points[0].p), a.x, a.y, q.solid, q.ink, a.x > b.x, a.y < b.y);
-          label(ctx, size, app.fmtP(d.points[1].p), b.x, b.y, q.solid, q.ink, b.x > a.x, b.y < a.y);
+          if (seen(a)) label(ctx, size, app.fmtP(d.points[0].p), a.x, a.y, q.solid, q.ink, a.x > b.x, a.y < b.y);
+          if (seen(b)) label(ctx, size, app.fmtP(d.points[1].p), b.x, b.y, q.solid, q.ink, b.x > a.x, b.y < a.y);
         }
-        if (s.stats) {
+        if (s.stats && seen(b)) {
           var p0 = d.points[0].p, p1 = d.points[1].p, dl = Math.round(b.l - a.l), dp = p1 - p0;
           var txt = (dp >= 0 ? '+' : '−') + app.fmtP(Math.abs(dp)) + ' (' + (dp >= 0 ? '+' : '−') + Math.abs(dp / p0 * 100).toFixed(2) + '%)\n' +
                     Math.abs(dl) + ' bars, ' + fmtDur(d.points[1].t - d.points[0].t);
@@ -192,19 +193,114 @@
     });
     function redrawAll(){ requestUpdate(); toolbar(); }
 
-    // ------------------------------------------------------------ saving, undo
+    // ------------------------------------------------------------ saving: only what changed, so app windows never wipe each other
+    // mk.base is what the server is known to hold for the market on screen (id -> JSON). A save sends the drawings that differ
+    // from it and the ids that are gone, never the whole list, so a window with an out-of-date copy cannot delete what another
+    // window drew. The server answers with the revision the change was applied on: if this page had not seen that one, another
+    // window changed the market meanwhile, and the list is fetched again and merged. Other windows hear of every save at once
+    // (BroadcastChannel) and the list is checked again when the window gets the focus back. A save or load that fails is
+    // retried until it works and shown in red in the top bar meanwhile; a market left with unsaved changes keeps retrying.
+    var mk = null, left = [];
+    var bc = window.BroadcastChannel ? new BroadcastChannel('dollarbars-drawings') : null;
+    function listOf(m){ return m === mk ? items : m.items; }
+    function older(a, b){                                        // is revision a from before b? ("<server start>-<count>"; a restarted server's are all new)
+      if (!a || !b) return false;
+      var x = a.split('-'), y = b.split('-'); return x[0] === y[0] && +x[1] < +y[1];
+    }
+    function opsOf(m){
+      var up = [], del = [], seen = {};
+      listOf(m).forEach(function(d){ seen[d.id] = 1; if (m.base[d.id] !== JSON.stringify(d)) up.push(d); });
+      Object.keys(m.base).forEach(function(id){ if (!seen[id]) del.push(id); });
+      return {upsert: up, delete: del};
+    }
+    function status(){
+      left = left.filter(function(m){ return m.inflight || m.failed; });
+      var f = left.concat(mk ? [mk] : []).filter(function(m){ return m.failed; })[0];
+      app.saveState('drawings', f ? 'Drawings not saved: ' + f.failed : mk && !mk.loaded && mk.loadTries ? 'Drawings not loaded yet, retrying' : null);
+    }
+    function save(m, closing){
+      clearTimeout(m.timer); m.timer = null;
+      if (m.inflight && !closing) { m.again = true; return m.inflight; }
+      var o = opsOf(m);
+      if (!o.upsert.length && !o.delete.length) return m.inflight || Promise.resolve();
+      var sent = {}; o.upsert.forEach(function(d){ sent[d.id] = JSON.stringify(d); });
+      var p = m.inflight = app.post('/drawings?m=' + encodeURIComponent(m.key), o, closing).then(function(j){
+        if (m.inflight === p) m.inflight = null;
+        Object.keys(sent).forEach(function(id){ m.base[id] = sent[id]; }); o.delete.forEach(function(id){ delete m.base[id]; });
+        var others = j.prev !== m.rev; if (!older(j.rev, m.rev)) m.rev = j.rev; m.failed = null; m.tries = 0;
+        if (bc) bc.postMessage(m.key);
+        if (others && m === mk) fetchList(m, true);
+        var again = m.again; m.again = false; status();
+        if (again) return save(m);
+      }, function(err){
+        if (m.inflight === p) m.inflight = null;
+        m.again = false; m.failed = err.message || 'server not answering'; status();
+        clearTimeout(m.timer); m.timer = setTimeout(function(){ save(m); }, Math.min(30000, 1000 * Math.pow(2, m.tries++)));
+      });
+      return p;
+    }
+    function changed(){
+      if (selected && items.indexOf(selected) < 0) selected = null;
+      if (mk) { var m = mk; clearTimeout(m.timer); m.timer = setTimeout(function(){ save(m); }, m.failed ? 0 : 400); }
+      redrawAll(); buttons(); settle();
+    }
+    function flush(closing){ return Promise.all(left.concat(mk ? [mk] : []).map(function(m){ return save(m, closing); })); }
+    addEventListener('pagehide', function(){ flush(true); });
+
+    function clean(d){                                           // a saved drawing this version can show (others stay on the server untouched)
+      if (!d || d.type !== 'trendline' || typeof d.id !== 'string' || !Array.isArray(d.points) || d.points.length !== 2) return null;
+      d.style = Object.assign({}, BASE_STYLE, d.style || {}); return d;
+    }
+    function editing(){ return placing || drag || document.querySelector('.modal'); }
+    function fetchList(m, force){
+      if (m.fetching) { if (force) m.refetch = true; return; }
+      m.fetching = true;
+      fetch('/drawings?m=' + encodeURIComponent(m.key)).then(function(r){ return r.ok ? r.json() : Promise.reject(); }).then(function(j){
+        if (!Array.isArray(j.drawings)) throw new Error('bad reply');
+        m.fetching = false; m.loaded = true; m.loadTries = 0;
+        if (m === mk && !older(j.rev, m.rev)) {                   // (a reply that left before a save that has since come back is out of date)
+          if (editing()) m.held = true; else merge(m, j.drawings, j.rev);   // not under the user's hands: after the gesture
+        }
+        if (m.refetch) { m.refetch = false; fetchList(m); }
+        status();
+      }).catch(function(){
+        m.fetching = false; m.refetch = false;
+        if (m !== mk || m.loaded) return;
+        m.loadTries++; status();
+        clearTimeout(m.loadTimer); m.loadTimer = setTimeout(function(){ fetchList(m); }, Math.min(15000, 500 * Math.pow(2, m.loadTries)));
+      });
+    }
+    function settle(){ if (mk && mk.held && !editing()) { mk.held = false; fetchList(mk, true); } }
+    function merge(m, server, rev){                              // the server's list + what this window changed and has not saved yet
+      var o = opsOf(m), gone = {}, mine = {}, cur = {}, next = [], base = {};
+      o.delete.forEach(function(id){ gone[id] = 1; });
+      o.upsert.forEach(function(d){ mine[d.id] = d; });
+      items.forEach(function(d){ cur[d.id] = d; });
+      server.forEach(function(raw){
+        var d = clean(raw); if (!d) return;
+        var j = JSON.stringify(d); base[d.id] = j;
+        if (gone[d.id]) return;
+        if (mine[d.id]) { next.push(mine[d.id]); delete mine[d.id]; return; }
+        next.push(cur[d.id] && JSON.stringify(cur[d.id]) === j ? cur[d.id] : d);
+      });
+      o.upsert.forEach(function(d){ if (mine[d.id]) next.push(d); });   // drawn here, not on the server yet
+      next.sort(function(x, y){ return x.id < y.id ? -1 : x.id > y.id ? 1 : 0; });   // oldest first (ids start with the time drawn): the same stacking in every window
+      m.base = base; m.rev = rev;
+      if (JSON.stringify(next) === JSON.stringify(items)) return;
+      var sel = selected && selected.id;
+      if (undo.length || redo.length) { undo = []; redo = []; buttons(); }   // an undo step from before the server's list came in could wipe it
+      items = next; selected = items.filter(function(d){ return d.id === sel; })[0] || null; hover = null;
+      redrawAll();
+    }
+    function recheck(){ if (mk && mk.loaded && document.visibilityState === 'visible') fetchList(mk); }
+    addEventListener('focus', recheck);
+    document.addEventListener('visibilitychange', recheck);
+    if (bc) bc.onmessage = function(e){ if (mk && e.data === mk.key) fetchList(mk, true); };   // another window saved this market
+
+    // ------------------------------------------------------------ undo
     function snapshot(){ return JSON.stringify(items); }
     function pushUndo(snap){ undo.push(snap); if (undo.length > 200) undo.shift(); redo = []; buttons(); }
     function remember(){ pushUndo(snapshot()); }
-    function changed(){
-      var key = marketKey, list = JSON.parse(JSON.stringify(items));
-      pendingSave = function(){ return fetch('/drawings?m=' + encodeURIComponent(key), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({drawings:list}), keepalive:true}).catch(function(){}); };
-      clearTimeout(saveTimer); saveTimer = setTimeout(flush, 400);
-      if (selected && items.indexOf(selected) < 0) selected = null;
-      redrawAll(); buttons();
-    }
-    function flush(){ clearTimeout(saveTimer); if (pendingSave) { var f = pendingSave; pendingSave = null; f(); } }
-    addEventListener('pagehide', flush);
     function restore(snap){
       var id = selected && selected.id;
       items = JSON.parse(snap); selected = items.filter(function(d){ return d.id === id; })[0] || null; hover = null; changed();
@@ -217,16 +313,12 @@
     function setDefaults(style){ defaults = Object.assign({}, style); var dd = store.get('drawDefaults') || {}; dd.trendline = defaults; store.set('drawDefaults', dd); }
 
     function setMarket(key){
-      flush();
+      if (mk) { mk.items = items; save(mk); left.push(mk); }      // the market being left saves in the background
       placing = null; drag = null; host.style.cursor = tool === 'cursor' ? '' : 'crosshair';
-      marketKey = key; items = []; selected = hover = null; undo = []; redo = []; buttons(); redrawAll();
-      var mySeq = ++loadSeq;
-      fetch('/drawings?m=' + encodeURIComponent(key)).then(function(r){ return r.json(); }).then(function(j){
-        if (mySeq !== loadSeq) return;                           // another market was opened meanwhile
-        items = (j.drawings || []).filter(function(d){ return d && d.type === 'trendline' && d.points && d.points.length === 2; })
-          .map(function(d){ d.style = Object.assign({}, BASE_STYLE, d.style || {}); return d; });
-        redrawAll();
-      }).catch(function(){});
+      mk = left.filter(function(m){ return m.key === key; })[0] || {key:key, base:{}, rev:null, items:[], loaded:false, loadTries:0, tries:0};
+      left = left.filter(function(m){ return m !== mk; });
+      items = mk.items; selected = hover = null; undo = []; redo = []; buttons(); redrawAll(); status();
+      fetchList(mk, true);
     }
 
     // ------------------------------------------------------------ tools and the left toolbar
@@ -284,10 +376,17 @@
         '<button data-a="lock" class="' + (locked ? 'on' : '') + '" title="' + (locked ? 'Unlock' : 'Lock') + '">' + (locked ? ICON.lock : ICON.unlock) + '</button>' +
         '<button data-a="delete" title="Remove (Delete)">' + ICON.trash + '</button>';
       dtb.className = 'show';
-      var pos = ui.dtb, wrap = $('wrap');
-      if (pos) { dtb.style.left = Math.max(0, Math.min(wrap.clientWidth - dtb.offsetWidth, pos.x)) + 'px'; dtb.style.top = Math.max(0, Math.min(wrap.clientHeight - dtb.offsetHeight, pos.y)) + 'px'; dtb.style.transform = ''; }
-      else { dtb.style.left = '50%'; dtb.style.top = '.6rem'; dtb.style.transform = 'translateX(-50%)'; }
+      // where the user dragged it, else the top right of the pane; never under the update banner (nor, in its own spot, the legend)
+      var wrap = $('wrap'), wr = wrap.getBoundingClientRect(), w = dtb.offsetWidth, h = dtb.offsetHeight;
+      var x = Math.max(0, Math.min(wrap.clientWidth - w, ui.dtb ? ui.dtb.x : ts.width() - w - 12)), y = ui.dtb ? ui.dtb.y : 8;
+      var avoid = ui.dtb ? [$('banner')] : [$('legend'), $('banner')];
+      for (var k = 0; k < 2; k++) avoid.forEach(function(o){
+        var r = o.getBoundingClientRect(), ox = r.left - wr.left, oy = r.top - wr.top;
+        if (r.width && x < ox + r.width && x + w > ox && y < oy + r.height && y + h > oy) y = oy + r.height + 6;
+      });
+      dtb.style.left = x + 'px'; dtb.style.top = Math.max(0, Math.min(wrap.clientHeight - h, y)) + 'px';
     }
+    ts.subscribeSizeChange(function(){ if (selected) toolbar(); });   // the window was resized: keep it inside and clear of the banner
     function restyle(patch){ if (!selected) return; remember(); Object.assign(selected.style, patch); setDefaults(selected.style); changed(); }
     dtb.addEventListener('click', function(e){
       var b = e.target.closest('button'); if (!b || !selected) return;
@@ -317,7 +416,7 @@
     // ------------------------------------------------------------ trend line settings dialog (double-click a line, or the gear)
     function openSettings(d){
       var before = snapshot(), orig = JSON.parse(JSON.stringify(d));
-      function live(){ setDefaults(d.style); redrawAll(); }
+      function live(){ redrawAll(); }
       function check(body, name, field){
         var row = UI.el('div', 'row'), lab = UI.el('label', 'name'), cb = UI.el('input'); cb.type = 'checkbox'; cb.checked = !!d.style[field];
         cb.onchange = function(){ d.style[field] = cb.checked; live(); };
@@ -348,8 +447,12 @@
           });
         }}
       ],
-      onOk: function(){ if (JSON.stringify(d) !== JSON.stringify(orig)) pushUndo(before); changed(); },
-      onCancel: function(){ d.points = orig.points; d.style = orig.style; d.locked = orig.locked; setDefaults(d.style); changed(); }});
+      onOk: function(){
+        if (JSON.stringify(d) !== JSON.stringify(orig)) pushUndo(before);
+        if (JSON.stringify(d.style) !== JSON.stringify(orig.style)) setDefaults(d.style);   // the next new line looks like this one
+        changed();
+      },
+      onCancel: function(){ d.points = orig.points; d.style = orig.style; d.locked = orig.locked; changed(); }});
     }
 
     // ------------------------------------------------------------ mouse: placing, selecting, dragging
@@ -360,6 +463,8 @@
 
     host.addEventListener('mousedown', function(e){
       if (e.button !== 0 || UI.busy()) return;
+      var ae = document.activeElement;                           // the keys go back to the chart (Delete, Esc, Ctrl+Z…), not to a menu or button
+      if (ae && /INPUT|SELECT|TEXTAREA|BUTTON/.test(ae.tagName)) ae.blur();
       var p = local(e); if (!inPane(p)) return;
       shift = e.shiftKey;
       if (tool === 'trendline') {
@@ -373,7 +478,7 @@
       var h = hitAt(p.x, p.y);
       if (!h) { lastDown = null; if (selected) { selected = null; redrawAll(); } return; }   // empty chart: deselect and let it pan
       take(e);
-      var dbl = e.detail >= 2 && lastDown && lastDown.d === h.d;  // double-click = settings
+      var dbl = e.detail >= 2 && lastDown && lastDown.d.id === h.d.id;  // double-click = settings
       lastDown = dbl ? null : {d:h.d};
       selected = h.d; hover = null;
       if (dbl) { drag = null; redrawAll(); openSettings(h.d); return; }
@@ -426,7 +531,7 @@
       }
       if (drag) {
         var dr = drag; drag = null; host.style.cursor = '';
-        if (dr.moved) { pushUndo(dr.before); changed(); } else redrawAll();
+        if (dr.moved) { pushUndo(dr.before); changed(); } else { redrawAll(); settle(); }
       }
     });
     host.addEventListener('dblclick', function(e){                // the chart's own double-click stays off drawings
@@ -435,7 +540,7 @@
     function finish(){
       var d = placing.d; placing = null;
       var a = toPx(d.points[0]), b = toPx(d.points[1]);
-      if (!a || !b || (Math.abs(a.x - b.x) < 1 && Math.abs(a.y - b.y) < 1)) { redrawAll(); return; }   // nothing drawn
+      if (!a || !b || (Math.abs(a.x - b.x) < 1 && Math.abs(a.y - b.y) < 1)) { redrawAll(); settle(); return; }   // nothing drawn
       remember(); items.push(d);
       if (!ui.stay) setTool('cursor');
       selected = d;                                              // the new line stays selected, its toolbar shows
@@ -450,7 +555,7 @@
       if (e.key === 'Escape') {                                  // cancel what is being drawn, back to the cursor, nothing selected
         placing = null;
         if (tool !== 'cursor') setTool('cursor');
-        selected = null; redrawAll();
+        selected = null; redrawAll(); settle();
       }
       else if ((e.key === 'Delete' || e.key === 'Backspace') && selected && !drag && !selected.locked && !ui.lock) { e.preventDefault(); remove(selected); }
       else if (e.altKey && ctrl && e.code === 'KeyH') { e.preventDefault(); toggleHide(); }
@@ -465,7 +570,8 @@
       setMarket: setMarket,
       refresh: function(){ requestUpdate(); if (selected) toolbar(); },
       flush: flush,
-      _state: function(){ return {tool:tool, items:items, selected:selected && selected.id, undo:undo.length, redo:redo.length, placing:!!placing}; },   // tests, console
+      _state: function(){ return {tool:tool, items:items, selected:selected && selected.id, undo:undo.length, redo:redo.length, placing:!!placing,
+                                  loaded: !!(mk && mk.loaded), rev: mk && mk.rev, failed: mk && mk.failed, left: left.length}; },   // tests, console
       _px: function(i){ return items[i] ? items[i].points.map(toPx) : null; }
     };
   };

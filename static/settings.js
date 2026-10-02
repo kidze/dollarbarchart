@@ -26,9 +26,20 @@
   }
 
   window.DBCSettings = function(app){
-    var look = merge(DEFAULTS, app.store.get('appearance'));
+    var look = merge(DEFAULTS, app.store.get('appearance')), shown = look, lineNow = null;
 
+    // The chart draws the last-price line and its axis label in the newest candle's body color. With the body hidden (or
+    // nearly see-through) they would vanish, so then they get that color solid. Called again whenever the newest bar changes.
+    function priceLine(){
+      var b = app.lastBar(), want = '';
+      if (b) {
+        var c = UI.parse(b.c >= b.o ? shown.body.up : shown.body.down);
+        if (c && (!shown.body.show || c.a < 0.2)) want = 'rgb(' + c.r + ',' + c.g + ',' + c.b + ')';
+      }
+      if (want !== lineNow) { lineNow = want; app.series.applyOptions({priceLineColor: want}); }
+    }
     function apply(l){
+      shown = l;
       app.chart.applyOptions({layout:{background: l.bg.type === 'gradient'
         ? {type:'gradient', topColor:l.bg.top, bottomColor:l.bg.bottom} : {type:'solid', color:l.bg.color}}});
       app.series.applyOptions({
@@ -36,6 +47,7 @@
         borderVisible: l.border.show, borderUpColor: l.border.up, borderDownColor: l.border.down,
         wickVisible: l.wick.show, wickUpColor: l.wick.up, wickDownColor: l.wick.down
       });
+      priceLine();
     }
     apply(look);
 
@@ -91,6 +103,6 @@
       });
     }
 
-    return {open: open, apply: function(){ apply(look); }, look: function(){ return look; }, DEFAULTS: DEFAULTS};
+    return {open: open, apply: function(){ apply(look); }, look: function(){ return look; }, priceLine: priceLine, DEFAULTS: DEFAULTS};
   };
 })();

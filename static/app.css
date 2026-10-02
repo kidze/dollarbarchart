@@ -9,8 +9,8 @@ button{font:inherit;color:inherit}
 svg{display:block}
 
 /* top toolbar */
-#top{display:flex;align-items:center;gap:.35rem;padding:.3rem .6rem;border-bottom:1px solid var(--bd);background:var(--s1);min-height:2.75rem}
-.tb{background:transparent;border:0;border-radius:.3rem;color:var(--tx);cursor:pointer;padding:.25rem .5rem;height:2.1rem;display:flex;align-items:center}
+#top{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;padding:.3rem .6rem;border-bottom:1px solid var(--bd);background:var(--s1);min-height:2.75rem}
+.tb{flex:none;background:transparent;border:0;border-radius:.3rem;color:var(--tx);cursor:pointer;padding:.25rem .5rem;height:2.1rem;display:flex;align-items:center}
 .tb:hover:not(:disabled){background:var(--s3)}
 .tb:disabled{color:var(--tx3);opacity:.5;cursor:default}
 .tb.icon{width:2.1rem;padding:0;justify-content:center}
@@ -19,14 +19,17 @@ svg{display:block}
 #tick small{font-weight:500;font-size:.84rem;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #star{color:var(--tx3);font-size:1.3rem}
 #star.on{color:var(--warn)}
+#top .grp{display:flex;flex:none;gap:.35rem}                    /* buttons that wrap to a second row together */
 .sep{width:1px;align-self:stretch;margin:.35rem .25rem;background:var(--bd2)}
-.seg{display:inline-flex;border:1px solid var(--bd);border-radius:.4rem;overflow:hidden}
-.seg button{background:transparent;color:var(--tx2);border:0;padding:.33rem .8rem;font-weight:600;cursor:pointer}
+.seg{flex:none;display:inline-flex;border:1px solid var(--bd);border-radius:.4rem;overflow:hidden}
+.seg button{white-space:nowrap;background:transparent;color:var(--tx2);border:0;padding:.33rem .8rem;font-weight:600;cursor:pointer}
 .seg button:hover{color:var(--tx)}
 .seg button.on{background:var(--acc);color:#fff}
 select{background:var(--s2);color:var(--tx);border:1px solid var(--bd);border-radius:.4rem;padding:.3rem .5rem;font:inherit;font-weight:600}
-label{color:var(--tx3);font-size:.9rem;display:flex;align-items:center;gap:.4rem;margin-left:.3rem}
-#status{margin-left:auto;font-size:.88rem;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:.6rem}
+label{flex:none;white-space:nowrap;color:var(--tx3);font-size:.9rem;display:flex;align-items:center;gap:.4rem;margin-left:.3rem}
+#status{flex:1 1 14rem;min-width:0;text-align:right;font-size:.88rem;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:.6rem}   /* too little room: it moves to a second row */
+#unsaved{display:none;flex:none;color:var(--dn);font-size:.88rem;font-weight:600;white-space:nowrap;margin-left:.4rem;cursor:help}
+#unsaved.show{display:inline}
 #status i{display:inline-block;width:.57rem;height:.57rem;border-radius:50%;background:var(--tx3);margin-right:.43rem;vertical-align:middle}
 #status.live i{background:var(--up)}
 #status.busy i{background:var(--warn)}

@@ -38,9 +38,9 @@
   ];
 
   // things that close when you click elsewhere or press Esc: only one at a time
-  var popup = null;
+  var popup = null, dismissed = null;                            // dismissed: the press that closed a popup does nothing else
   function closePopup(){ if (popup) { var p = popup; popup = null; p.close(); } }
-  document.addEventListener('pointerdown', function(e){ if (popup && !popup.el.contains(e.target) && !(popup.anchor && popup.anchor.contains(e.target))) closePopup(); }, true);
+  document.addEventListener('pointerdown', function(e){ if (popup && !popup.el.contains(e.target) && !(popup.anchor && popup.anchor.contains(e.target))) { closePopup(); dismissed = e; } }, true);
   document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && popup) { e.stopImmediatePropagation(); closePopup(); } }, true);   // Esc closes the picker, not the dialog under it
   function place(box, anchor){
     var r = anchor.getBoundingClientRect(), w = box.offsetWidth, h = box.offsetHeight;
@@ -92,7 +92,9 @@
     native.addEventListener('input', function(){ var p = parse(native.value); if (p) { c.r = p.r; c.g = p.g; c.b = p.b; emit(); } });
     native.addEventListener('change', function(){
       var h = hex(c), list = (opts.custom || []).filter(function(s){ var p = parse(s); return p && hex(p) !== h; });
-      list.unshift(h); opts.custom = list.slice(0, 29);                    // TradingView keeps 29 if (opts.onCustom) opts.onCustom(opts.custom); drawCustom();
+      list.unshift(h); opts.custom = list.slice(0, 29);                    // TradingView keeps 29
+      if (opts.onCustom) opts.onCustom(opts.custom);
+      drawCustom();
     });
     function dragOpacity(e){
       var r = track.getBoundingClientRect();
@@ -127,7 +129,7 @@
   }
 
   /* A modal dialog: {title, tabs: [{name, render(body)}], onOk, onCancel, extra: [{html, onClick}] (left of the buttons)}.
-     Dragging the title moves it; Esc = cancel, Enter (outside text fields) = Ok. */
+     Dragging the title moves it; Esc = cancel, Enter = Ok (unless a field or button has the focus: a focused button does its own thing). */
   function dialog(o){
     closePopup();
     var m = el('div', 'modal'), d = el('div', 'dlg');
@@ -148,13 +150,13 @@
     function key(e){
       if (popup) return;
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(false); }
-      else if (e.key === 'Enter' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); close(true); }
+      else if (e.key === 'Enter' && !/INPUT|SELECT|TEXTAREA|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); close(true); }
     }
     document.addEventListener('keydown', key, true);
     d.querySelector('.x').onclick = function(){ close(false); };
     d.querySelector('.cancel').onclick = function(){ close(false); };
     d.querySelector('.ok').onclick = function(){ close(true); };
-    m.addEventListener('pointerdown', function(e){ if (e.target === m) close(false); });
+    m.addEventListener('pointerdown', function(e){ if (e.target === m && e !== dismissed) close(false); });   // a click that only closed a color picker keeps the dialog
     Array.prototype.forEach.call(d.querySelectorAll('.tabs button'), function(b){ b.onclick = function(){ show(+b.dataset.i); }; });
     var h3 = d.querySelector('h3');
     h3.addEventListener('pointerdown', function(e){

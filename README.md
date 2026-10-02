@@ -24,7 +24,9 @@ amount of market activity. TradingView does not draw them, so this does.
   `Delete` removes it, double-click opens its settings (color with opacity, width, style, extend left/right,
   middle point, price labels, stats), `Ctrl+Z` / `Ctrl+Y` undo and redo, `Esc` cancels. The left toolbar also
   has stay-in-drawing-mode, lock all, hide all (`Ctrl+Alt+H`) and remove all. Drawings are saved per market
-  and anchored by time and price, so they show on every bar size and time frame.
+  and anchored by time and price, so they show on every bar size and time frame. Two app windows open at once
+  show each other's changes and never overwrite each other; if a save fails (server restarting) the top bar
+  says so in red and it is retried until it works.
 * **Chart settings** (gear in the top bar): candle body, borders and wick on/off with up and down colors, and
   a solid or gradient background, all with opacity, in a TradingView-style color picker (its palette, your
   own custom colors, an opacity slider). Changes preview live; Cancel puts the chart back.

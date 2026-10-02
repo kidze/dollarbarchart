@@ -18,8 +18,8 @@ reloads by itself.
   /search?q=    markets matching what was typed (empty q = the watchlist)
   /pick?t=      resolve a ticker to the market with the most history (probes depth if unknown)
   /watchlist?add=T | ?remove=T
-  /drawings?m=  the market's saved drawings (GET), or replace them (POST {"drawings": [...]})
-  /settings     the chart's saved look (GET), or replace it (POST {"settings": {...}})
+  /drawings?m=  the market's saved drawings and their revision (GET), or change some (POST {"upsert": [...], "delete": [ids]})
+  /settings     the chart's saved look (GET), or change some of its keys (POST {"settings": {key: value, ...}})
   /static/<f>   the page's scripts and styles
   /ping, /restart
 """
@@ -669,7 +669,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     return self.js({"error": "not found"}, 404)
                 return self.send(200, f.read_bytes(), PAGE_TYPES[f.suffix])
             if p == "/drawings":
-                return self.js({"drawings": U.get_drawings(q.get("m", [DEFAULT_MARKET])[0])})
+                items, rev = U.get_drawings(q.get("m", [DEFAULT_MARKET])[0])
+                return self.js({"drawings": items, "rev": rev})
             if p == "/settings":
                 return self.js({"settings": U.get_settings()})
             if p == "/ping":
@@ -742,10 +743,10 @@ class H(http.server.BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("send a JSON object")
             if p == "/drawings":
-                U.put_drawings(q.get("m", [""])[0], body.get("drawings"))
-                return self.js({"ok": True})
+                prev, rev = U.change_drawings(q.get("m", [""])[0], body.get("upsert"), body.get("delete"))
+                return self.js({"ok": True, "prev": prev, "rev": rev})   # prev = what this change was applied on
             if p == "/settings":
-                U.put_settings(body.get("settings"))
+                U.change_settings(body.get("settings"))
                 return self.js({"ok": True})
             self.js({"error": "not found"}, 404)
         except ValueError as e:

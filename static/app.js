@@ -23,37 +23,90 @@
   var key = function(){ return mode === 'dollar' ? 'd:' + size : 't:' + tf; };
   var sameBar = function(a, b){ return a && b && a.t === b.t && a.o === b.o && a.h === b.h && a.l === b.l && a.c === b.c && a.d === b.d; };
 
+  // ---------------------------------------------------------------- saving to the server
+  // A save is an ordinary request whose answer is read. Only the last one, sent as the window closes, is a keepalive request:
+  // the browser lets those carry 64 KB at most, counted until their answers are read.
+  function post(url, obj, closing){
+    var body = JSON.stringify(obj);
+    return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: body,
+                       keepalive: !!closing && new Blob([body]).size < 60000})
+      .then(function(r){ return r.json().catch(function(){ return {}; }).then(function(j){ if (!r.ok || !j.ok) throw new Error(j.error || 'HTTP ' + r.status); return j; }); });
+  }
+  // what could not be saved (or loaded) right now, shown in red in the top bar until a retry works
+  var failing = {};
+  function saveState(what, problem){
+    if (problem) failing[what] = problem; else delete failing[what];
+    var k = Object.keys(failing), e = $('unsaved');
+    e.className = k.length ? 'show' : '';
+    e.textContent = k.length ? '⚠ ' + failing[k[0]] : '';
+    e.title = k.map(function(w){ return failing[w]; }).join('\n') + '\nRetrying by itself; nothing is lost while this window stays open.';
+  }
+
   // ---------------------------------------------------------------- saved settings (data/settings.json via the server)
+  // A save sends only the keys that changed and the server merges them in, so two app windows never undo each other's choices.
   var store = (function(){
-    var data = {}, timer = null;
-    function flush(){
+    var data = {}, dirty = {}, timer = null, inflight = null, tries = 0;
+    function send(closing){
       clearTimeout(timer); timer = null;
-      return fetch('/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({settings: data}), keepalive: true}).catch(function(){});
+      var keys = Object.keys(dirty); if (!keys.length) return Promise.resolve();
+      if (inflight && !closing) return inflight.then(function(){ return send(); });
+      var out = {}; keys.forEach(function(k){ out[k] = data[k] === undefined ? null : data[k]; }); dirty = {};
+      var p = inflight = post('/settings', {settings: out}, closing).then(function(){
+        inflight = null; tries = 0; saveState('settings', null);
+      }, function(err){
+        inflight = null; keys.forEach(function(k){ dirty[k] = true; });
+        saveState('settings', 'Settings not saved: ' + err.message);
+        clearTimeout(timer); timer = setTimeout(send, Math.min(30000, 1000 * Math.pow(2, tries++)));
+      });
+      return p;
     }
     return {
-      load: function(){ return fetch('/settings').then(function(r){ return r.json(); }).then(function(j){ data = (j && j.settings) || {}; }).catch(function(){}); },
+      load: function(){                                          // a few tries (the server may still be starting), then go on with defaults
+        var n = 0;
+        return new Promise(function(done){
+          (function attempt(){
+            fetch('/settings').then(function(r){ return r.ok ? r.json() : Promise.reject(); }).then(function(j){ data = j.settings || {}; done(); },
+              function(){ if (++n < 5) setTimeout(attempt, 1000); else done(); });
+          })();
+        });
+      },
       get: function(k){ return data[k]; },
-      set: function(k, v){ data[k] = v; clearTimeout(timer); timer = setTimeout(flush, 300); },
-      flush: function(){ if (timer) flush(); }
+      set: function(k, v){ data[k] = v; dirty[k] = true; clearTimeout(timer); timer = setTimeout(send, 300); },
+      flush: function(closing){ return send(closing); }
     };
   })();
-  addEventListener('pagehide', function(){ store.flush(); });
+  addEventListener('pagehide', function(){ store.flush(true); });
 
   // ---------------------------------------------------------------- bar position <-> time (drawings are anchored to time + price)
   // The x-axis is bar order, so a drawing keeps its times and is placed on whatever bars the chart shows: inside the history a
-  // time maps between the open times of the bars around it; past either end it moves one bar per typical bar duration.
-  var tCache = null, tSeq = -1, stepHead = 60, stepTail = 60;
+  // time maps between the open times of the bars around it. The newest bar spans its open time to tEnd (for the forming dollar
+  // bar: at least up to its latest minute, so a time inside it stays on it); after that, and before the first bar, a time moves
+  // one bar per typical bar duration (on 1M, per calendar month).
+  var tCache = null, tSeq = -1, stepHead = 60, stepTail = 60, tEnd = 0, monthly = false;
   function medianStep(a, i0, i1){
     var d = []; for (var i = i0; i < i1; i++) d.push(a[i+1] - a[i]);
     if (!d.length) return 60;
     d.sort(function(x, y){ return x - y; }); return d[d.length >> 1] || 60;
   }
+  function monthAdd(t, k){                                       // the month start k calendar months after t's month (k may have a fraction)
+    var d = new Date(t * 1000), f = Math.floor(k), y = d.getUTCFullYear(), m = d.getUTCMonth() + f;
+    var t0 = Date.UTC(y, m, 1) / 1000, t1 = Date.UTC(y, m + 1, 1) / 1000;
+    return t0 + (k - f) * (t1 - t0);
+  }
+  function monthsFrom(t0, t){                                    // calendar months from month start t0 to t, with the fraction (negative before)
+    var d0 = new Date(t0 * 1000), d = new Date(t * 1000);
+    var k = (d.getUTCFullYear() - d0.getUTCFullYear()) * 12 + d.getUTCMonth() - d0.getUTCMonth();
+    var s = monthAdd(t0, k), e = monthAdd(t0, k + 1);
+    return k + (t - s) / (e - s);
+  }
   function times(){
     if (tSeq !== seq) {
       tCache = bars.map(function(b){ return b.t; }); if (forming) tCache.push(forming.t);
-      var n = tCache.length, fixed = mode === 'time' && TF_S[tf];
+      var n = tCache.length, fixed = mode === 'time' && TF_S[tf], last = forming || bars[n-1];
+      monthly = mode === 'time' && tf === '1M';
       stepHead = fixed || medianStep(tCache, 0, Math.min(n - 1, 50));
       stepTail = fixed || medianStep(tCache, Math.max(0, n - 51), n - 1);
+      tEnd = !n ? 0 : monthly ? monthAdd(tCache[n-1], 1) : Math.max(tCache[n-1] + stepTail, mode === 'dollar' && last.e || 0);
       tSeq = seq;
     }
     return tCache;
@@ -61,8 +114,9 @@
   function timeToLogical(t){
     var a = times(), n = a.length;
     if (!n) return null;
-    if (t <= a[0]) return (t - a[0]) / stepHead;
-    if (t >= a[n-1]) return (n - 1) + (t - a[n-1]) / stepTail;
+    if (t < a[0]) return monthly ? monthsFrom(a[0], t) : (t - a[0]) / stepHead;
+    if (t >= tEnd) return n + (monthly ? monthsFrom(tEnd, t) : (t - tEnd) / stepTail);
+    if (t >= a[n-1]) return (n - 1) + (t - a[n-1]) / (tEnd - a[n-1]);
     var lo = 0, hi = n - 1;
     while (hi - lo > 1) { var mid = (lo + hi) >> 1; if (a[mid] <= t) lo = mid; else hi = mid; }
     return lo + (t - a[lo]) / (a[hi] - a[lo]);
@@ -70,8 +124,9 @@
   function logicalToTime(l){
     var a = times(), n = a.length;
     if (!n) return null;
-    if (l <= 0) return a[0] + l * stepHead;
-    if (l >= n - 1) return a[n-1] + (l - (n - 1)) * stepTail;
+    if (l < 0) return monthly ? monthAdd(a[0], l) : a[0] + l * stepHead;
+    if (l >= n) return monthly ? monthAdd(tEnd, l - n) : tEnd + (l - n) * stepTail;
+    if (l >= n - 1) return a[n-1] + (l - (n - 1)) * (tEnd - a[n-1]);
     var i = Math.floor(l); return a[i] + (l - i) * (a[i+1] - a[i]);
   }
 
@@ -174,7 +229,7 @@
     seq++;
     series.setData(data); fitLimit();
     if (reset) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0, data.length - 260), to:data.length + 4}); scale.applyOptions({autoScale:true}); }
-    stats(); draw.refresh();
+    stats(); settings.priceLine(); draw.refresh();
   }
   function scheduleRetry(){ clearTimeout(retryTimer); retryTimer = setTimeout(function(){ load(true); }, 3000); }
   function load(reset){
@@ -225,7 +280,7 @@
       forming = k.forming;
       if (forming) { byTime[forming.t] = forming; series.update(candle(forming)); }
       if (bars.length + (forming ? 1 : 0) !== before || (forming && forming.t) !== formingT) { seq++; draw.refresh(); }
-      fitLimit(); stats();
+      fitLimit(); stats(); settings.priceLine();
     }).catch(function(){ if (!restarting) setStatus({sync:'server not answering'}); });
   }
 
@@ -271,16 +326,21 @@
   // ---------------------------------------------------------------- update banner: page-only changes reload, code changes restart the server in place
   function checkUpdate(m){
     if (restarting) return;
-    if (!m || !m.update) { update = null; $('banner').className = ''; return; }
+    if (!m || !m.update) { if (update) { update = null; $('banner').className = ''; draw.refresh(); } return; }
     update = m.update;
     $('bannerText').textContent = update.kind === 'reload'
       ? 'Update available: ' + update.files.join(', ') + ' changed (page reload, instant)'
       : 'Update available: ' + update.files.join(', ') + ' changed (server restart, about 10 s)';
-    $('banner').className = 'show';
+    if ($('banner').className !== 'show') { $('banner').className = 'show'; draw.refresh(); }   // the drawing toolbar moves out of its way
   }
   function runUpdate(){
     if (!update) return;
-    store.flush(); draw.flush();
+    $('bannerBtn').disabled = true;
+    var saved = Promise.all([store.flush(), draw.flush()]).catch(function(){});
+    var waited = new Promise(function(done){ setTimeout(done, 4000); });
+    Promise.race([saved, waited]).then(function(){ restartNow(); });   // unsaved work goes first (but a dead server does not block the update)
+  }
+  function restartNow(){
     if (update.kind === 'reload') { location.reload(); return; }
     restarting = true; $('bannerText').textContent = 'Restarting the server…'; $('bannerBtn').disabled = true; setStatus({sync:'restarting…'});
     var oldPid = null, t0 = Date.now(), iv = null;
@@ -332,14 +392,17 @@
     $('bannerBtn').onclick = runUpdate;
     $('bDollar').onclick = function(){ switchTo('dollar'); };
     $('bTime').onclick = function(){ switchTo('time'); };
-    $('size').onchange = function(){ size = +this.value; save(); load(true); };
-    $('tf').onchange = function(){ tf = this.value; save(); load(true); };
+    $('size').onchange = function(){ size = +this.value; this.blur(); save(); load(true); };   // blur: the keys go back to the chart
+    $('tf').onchange = function(){ tf = this.value; this.blur(); save(); load(true); };
     if (mode === 'time') { $('bDollar').className = ''; $('bTime').className = 'on'; $('lSize').style.display = 'none'; $('lTf').style.display = ''; }
     $('bSettings').onclick = function(){ settings.open(); };
   }
 
   // what settings.js and draw.js see of the page
   app.store = store;
+  app.post = post;
+  app.saveState = saveState;
+  app.lastBar = function(){ return forming || bars[bars.length-1] || null; };
   app.timeToLogical = timeToLogical;
   app.logicalToTime = logicalToTime;
   app.barCount = function(){ return bars.length + (forming ? 1 : 0); };
