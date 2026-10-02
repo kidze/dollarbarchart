@@ -18,6 +18,18 @@ amount of market activity. TradingView does not draw them, so this does.
 * TradingView-style chart (Lightweight Charts): drag the price or time axis to zoom, double-click to reset,
   `A` auto-scale and `L` log-scale buttons, OHLC + bar duration + dollars on hover, bar statistics in the
   header (count, median / fastest / slowest bar, busiest and quietest month, last 365 days, forming bar).
+  Zooming out goes as far as the whole history.
+* **Trend lines**, drawn like on TradingView: pick the tool in the left toolbar (or `Alt+T`), click two points
+  or press-drag-release; hold `Shift` for a horizontal line. Click a line to select it, drag it or its ends,
+  `Delete` removes it, double-click opens its settings (color with opacity, width, style, extend left/right,
+  middle point, price labels, stats), `Ctrl+Z` / `Ctrl+Y` undo and redo, `Esc` cancels. The left toolbar also
+  has stay-in-drawing-mode, lock all, hide all (`Ctrl+Alt+H`) and remove all. Drawings are saved per market
+  and anchored by time and price, so they show on every bar size and time frame. Two app windows open at once
+  show each other's changes and never overwrite each other; if a save fails (server restarting) the top bar
+  says so in red and it is retried until it works.
+* **Chart settings** (gear in the top bar): candle body, borders and wick on/off with up and down colors, and
+  a solid or gradient background, all with opacity, in a TradingView-style color picker (its palette, your
+  own custom colors, an opacity slider). Changes preview live; Cancel puts the chart back.
 * **Nothing runs while the window is closed.** Downloads happen only while the app is open; two minutes
   after the last page request the server writes what it has to disk and exits. The next launch resumes.
 * A **watchlist** (☆ next to the ticker) is downloaded in the background while the app is open, so those
@@ -36,7 +48,8 @@ Needs Python 3.10+ with `numpy`, `pandas` and `pyarrow` (`pip install -r require
 * **By hand:** `python server.py`, then open <http://127.0.0.1:8793/>.
 
 Candles are stored per market in `data/` (about 16 MB per market-year; the full BTC perpetual history is
-~110 MB). `data/watchlist.json` holds the watchlist; edit it or use the ☆ button.
+~110 MB). `data/watchlist.json` holds the watchlist; edit it or use the ☆ button. Your drawings are in
+`data/drawings.json` and the chart settings in `data/settings.json`.
 
 Every file in `data/` is written to a temporary file, forced to the disk, then swapped in, so a crash or a
 power cut leaves either the old version or the new one. A market file that is damaged anyway (for example
@@ -61,10 +74,15 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 | `bybit_sync.py` | keyless Bybit v5 kline requests; one parquet per market; streaming, resumable, checkpointed backfill that stops within one request when asked |
 | `markets.py` | instrument index (cached daily), ticker aliases (PUMPFUN → PUMP, NVDAX → NVDA), search ranking, deepest-history choice, watchlist file |
 | `bars.py` | dollar bars and time bars from the candles, incrementally as new minutes arrive; per-market size menu |
-| `server.py` | local HTTP server: `/bars?m=` (full history), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |
-| `index.html` | the chart page and ticker picker |
+| `server.py` | local HTTP server: `/bars?m=` (full history), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/drawings?m=`, `/settings`, `/static/…`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |
+| `userdata.py` | saved drawings (per market) and chart settings, written crash-safe like the candles; only the app's own page may change them |
+| `index.html` | the page layout: top bar, drawing toolbar, chart |
+| `static/app.js` | loading and live-updating the chart, ticker picker, watchlist, stats, legend, update banner |
+| `static/draw.js` | the drawing tools (trend line), their toolbars and settings, undo/redo, saving |
+| `static/settings.js` | the chart settings dialog (candles, background) |
+| `static/ui.js`, `static/app.css` | color picker, menus, dialogs; the page's styles |
 | `lightweight-charts.js` | TradingView Lightweight Charts v5.2.1, vendored (Apache-2.0, logo must stay) |
-| `tests/` | bar-cutting, search and crash-safety tests: `python tests/test_bars.py`, `python tests/test_markets.py`, `python tests/test_storage.py` (or `pytest`) |
+| `tests/` | bar-cutting, search, crash-safety and saved-drawings tests: `python tests/test_bars.py`, `python tests/test_markets.py`, `python tests/test_storage.py`, `python tests/test_userdata.py` (or `pytest`) |
 
 Market keys are `linear:SYMBOL` (perpetual) or `spot:SYMBOL`; the page keeps the current one in the URL
 hash, so `http://127.0.0.1:8793/#spot:PUMPUSDT` opens that market directly.

@@ -3,360 +3,76 @@
 <head>
 <meta charset="utf-8">
 <title>dollar bars</title>
-<style>
-  :root{--bg:#0b0c0e;--s1:#121316;--bd:#23262d;--tx:#e6e8ec;--tx2:#a8adb8;--tx3:#6e7681;--up:#2ebd85;--dn:#f23645;--acc:#5cb8f2}
-  *{box-sizing:border-box}
-  /* UI size: everything below is in rem, so this one number scales the whole page (the chart's axis text follows it too) */
-  html{font-size:18px}
-  html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font-family:-apple-system,"Segoe UI",Inter,Roboto,sans-serif}
-  body{display:flex;flex-direction:column;font-size:1rem;line-height:1.45}
-  header{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;padding:.65rem 1.15rem;border-bottom:1px solid var(--bd);background:var(--s1)}
-  #tick{background:transparent;color:var(--tx);border:1px solid var(--bd);border-radius:.57rem;padding:.3rem .7rem;font:inherit;font-weight:700;font-size:1.15rem;cursor:pointer;display:flex;align-items:center;gap:.57rem;max-width:30rem}
-  #tick:hover{border-color:var(--acc)}
-  #tick small{font-weight:500;font-size:.86rem;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  #star{background:transparent;border:0;color:var(--tx3);font-size:1.3rem;cursor:pointer;padding:0 .15rem;line-height:1}
-  #star.on{color:#F2A33A}
-  .seg{display:inline-flex;border:1px solid var(--bd);border-radius:.57rem;overflow:hidden}
-  .seg button{background:transparent;color:var(--tx2);border:0;padding:.43rem .86rem;font:inherit;font-weight:600;cursor:pointer}
-  .seg button.on{background:var(--acc);color:#08131c}
-  select{background:#1a1c20;color:var(--tx);border:1px solid var(--bd);border-radius:.57rem;padding:.36rem .57rem;font:inherit;font-weight:600}
-  label{color:var(--tx3);font-size:.9rem}
-  #status{margin-left:auto;font-size:.9rem;color:var(--tx3);white-space:nowrap}
-  #status i{display:inline-block;width:.57rem;height:.57rem;border-radius:50%;background:var(--tx3);margin-right:.43rem;vertical-align:middle}
-  #status.live i{background:var(--up)}
-  #status.busy i{background:#F2A33A}
-  #stats{width:100%;color:var(--tx2);font-size:.9rem}
-  #stats b{color:var(--tx)}
-  #prog{display:none;width:100%;align-items:center;gap:.7rem;font-size:.9rem;color:var(--tx2)}
-  #prog.show{display:flex}
-  #prog .bar{flex:1;height:.43rem;background:#1a1c20;border-radius:.21rem;overflow:hidden}
-  #prog .bar i{display:block;height:100%;background:var(--acc);width:0}
-  #legend{position:absolute;z-index:5;left:1rem;top:.7rem;font-size:.9rem;color:var(--tx2);pointer-events:none;
-          font-variant-numeric:tabular-nums;background:rgba(11,12,14,.72);padding:.3rem .57rem;border-radius:.43rem}
-  #legend b{color:var(--tx)}
-  #wrap{position:relative;flex:1;min-height:0}
-  #chart{position:absolute;inset:0}
-  #axis{position:absolute;z-index:6;right:.43rem;bottom:.36rem;display:flex;gap:.2rem}
-  #axis button{width:1.45rem;height:1.3rem;padding:0;border:1px solid var(--bd);border-radius:.3rem;background:var(--s1);color:var(--tx3);
-               font:700 .8rem/1 -apple-system,"Segoe UI",Inter,Roboto,sans-serif;cursor:pointer}
-  #axis button.on{color:var(--acc);border-color:var(--acc)}
-  #banner{position:absolute;z-index:7;left:50%;top:.86rem;transform:translateX(-50%);display:none;align-items:center;gap:.86rem;
-          background:#1a1c20;border:1px solid var(--acc);border-radius:.7rem;padding:.57rem .7rem .57rem 1rem;font-size:.93rem;box-shadow:0 6px 24px rgba(0,0,0,.5)}
-  #banner.show{display:flex}
-  #banner button{background:var(--acc);color:#08131c;border:0;border-radius:.5rem;padding:.43rem .86rem;font:inherit;font-weight:700;cursor:pointer}
-  #empty{position:absolute;z-index:4;inset:0;display:none;align-items:center;justify-content:center;color:var(--tx3);font-size:1rem;text-align:center;padding:1.4rem}
-  #empty.show{display:flex}
-  #picker{position:absolute;z-index:8;inset:0;display:none;background:rgba(0,0,0,.55);align-items:flex-start;justify-content:center;padding-top:2.85rem}
-  #picker.show{display:flex}
-  #pbox{width:40rem;max-width:95%;max-height:80%;display:flex;flex-direction:column;background:var(--s1);border:1px solid var(--bd);border-radius:.86rem;box-shadow:0 12px 40px rgba(0,0,0,.6)}
-  #q{background:#1a1c20;color:var(--tx);border:0;border-bottom:1px solid var(--bd);border-radius:.86rem .86rem 0 0;padding:.86rem 1rem;font:inherit;font-size:1.15rem;outline:none}
-  #res{overflow:auto;padding:.43rem 0}
-  #res .hint{padding:.7rem 1rem;color:var(--tx3);font-size:.9rem}
-  .grp{padding:.43rem 1rem;border-bottom:1px solid #1a1c20}
-  .grp:last-child{border-bottom:0}
-  .gh{display:flex;align-items:baseline;gap:.57rem}
-  .gh b{font-size:1.07rem}
-  .gh span{color:var(--tx3);font-size:.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .gh em{margin-left:auto;font-style:normal;color:var(--tx3);font-size:.82rem;white-space:nowrap}
-  .gm{display:flex;flex-wrap:wrap;gap:.43rem;margin-top:.3rem}
-  .gm button{background:#1a1c20;color:var(--tx2);border:1px solid var(--bd);border-radius:.43rem;padding:.2rem .57rem;font:inherit;font-size:.9rem;cursor:pointer;font-variant-numeric:tabular-nums}
-  .gm button:hover{border-color:var(--acc);color:var(--tx)}
-  .gm button.best{border-color:#2B9667;color:var(--tx)}
-  .gm button.cur{background:var(--acc);color:#08131c;border-color:var(--acc)}
-  .gm button .tag{color:var(--tx3);font-size:.8rem}
-  .gm button.best .tag{color:#2ebd85}
-  footer{padding:.5rem 1.15rem;border-top:1px solid var(--bd);color:var(--tx3);font-size:.82rem;background:var(--s1)}
-</style>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="static/app.css">
 </head>
 <body>
-<header>
-  <button id="tick" title="Change ticker (press /)"><span id="tName">…</span><small id="tSub"></small></button>
-  <button id="star" title="Add to / remove from the watchlist (downloaded in the background while the app is open)">☆</button>
+<header id="top">
+  <button id="tick" class="tb" title="Symbol search (press /)"><span id="tName">…</span><small id="tSub"></small></button>
+  <button id="star" class="tb icon" title="Add to / remove from the watchlist (downloaded in the background while the app is open)">☆</button>
+  <i class="sep"></i>
   <div class="seg"><button id="bDollar" class="on">Dollar bars</button><button id="bTime">Time bars</button></div>
   <label id="lSize">size <select id="size"></select></label>
   <label id="lTf" style="display:none">timeframe <select id="tf"></select></label>
+  <i class="sep"></i>
+  <span class="grp">
+    <button id="bUndo" class="tb icon" title="Undo (Ctrl+Z)" disabled><svg viewBox="0 0 28 28"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M9.5 9.5H17a5.5 5.5 0 0 1 0 11h-5M12.5 6 9 9.5l3.5 3.5"/></svg></button>
+    <button id="bRedo" class="tb icon" title="Redo (Ctrl+Y)" disabled><svg viewBox="0 0 28 28"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M18.5 9.5H11a5.5 5.5 0 0 0 0 11h5M15.5 6 19 9.5 15.5 13"/></svg></button>
+    <button id="bSettings" class="tb icon" title="Chart settings"><svg viewBox="0 0 28 28"><g fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="14" cy="14" r="3.2"/><path d="M14 4.5l1.6 2.6 3-.6.9 2.9 2.8 1.2-.8 2.9 2 2.3-2.2 2 .6 3-2.9.8-1.3 2.8-2.9-.9L14 23.5l-1.8-2.5-2.9.9-1.3-2.8-2.9-.8.6-3-2.2-2 2-2.3-.8-2.9 2.8-1.2.9-2.9 3 .6z"/></g></svg></button>
+  </span>
+  <span id="unsaved"></span>
   <div id="status"><i></i><span>connecting…</span></div>
+</header>
+<div id="sub">
   <div id="prog"><span id="progText"></span><div class="bar"><i id="progFill"></i></div><span id="progPct"></span></div>
   <div id="stats"></div>
-</header>
-<div id="wrap">
-  <div id="chart"></div>
-  <div id="legend">hover a bar</div>
-  <div id="empty"></div>
-  <div id="axis"><button id="bAuto" title="Auto scale (double-click the price axis does the same)">A</button><button id="bLog" title="Logarithmic price scale">L</button></div>
-  <div id="banner"><span id="bannerText"></span><button id="bannerBtn">Update now</button></div>
-  <div id="picker"><div id="pbox"><input id="q" placeholder="Type a ticker: BTC, PUMP, HYPE, NVDA…  (Enter = the market with the most history)" autocomplete="off" spellcheck="false"><div id="res"></div></div></div>
 </div>
+<main>
+  <nav id="tools">
+    <button data-tool="cursor" class="on" title="Cross (Esc)"><svg viewBox="0 0 28 28"><path fill="currentColor" d="M13.5 4h1v9.5H24v1h-9.5V24h-1v-9.5H4v-1h9.5z"/></svg></button>
+    <button data-tool="trendline" title="Trend line (Alt+T) · hold Shift for a horizontal line"><svg viewBox="0 0 28 28"><g fill="none" stroke="currentColor" stroke-width="1.3"><path d="M8.2 19.8 19.8 8.2"/><circle cx="6.5" cy="21.5" r="2.3"/><circle cx="21.5" cy="6.5" r="2.3"/></g></svg></button>
+    <i class="hsep"></i>
+    <button id="tStay" title="Stay in drawing mode: keep the tool after placing a line"><svg viewBox="0 0 28 28"><g fill="none" stroke="currentColor" stroke-width="1.3"><path d="M17.5 6.5l4 4L11 21H7v-4z"/><path d="M15 9l4 4"/><path d="M5 24h18" stroke-dasharray="2 2"/></g></svg></button>
+    <button id="tLock" title="Lock all drawings"><svg viewBox="0 0 28 28"><g fill="none" stroke="currentColor" stroke-width="1.3"><rect x="8" y="13" width="12" height="9" rx="1.5"/><path d="M10.5 13V10a3.5 3.5 0 0 1 7 0v3"/></g></svg></button>
+    <button id="tHide" title="Hide all drawings"><svg viewBox="0 0 28 28"><g fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 14s3.8-6.5 10-6.5S24 14 24 14s-3.8 6.5-10 6.5S4 14 4 14z"/><circle cx="14" cy="14" r="3.2"/><path class="slash" d="M6 22 22 6"/></g></svg></button>
+    <button id="tRemove" title="Remove all drawings on this chart"><svg viewBox="0 0 28 28"><g fill="none" stroke="currentColor" stroke-width="1.3"><path d="M7 9h14M11.5 9V6.5h5V9M9 9l1 13h8l1-13M12.5 12.5v6.5M15.5 12.5v6.5"/></g></svg></button>
+  </nav>
+  <div id="wrap">
+    <div id="chart"></div>
+    <div id="legend">hover a bar</div>
+    <div id="empty"></div>
+    <div id="axis"><button id="bAuto" title="Auto scale (double-click the price axis does the same)">A</button><button id="bLog" title="Logarithmic price scale">L</button></div>
+    <div id="banner"><span id="bannerText"></span><button id="bannerBtn">Update now</button></div>
+    <div id="dtb"></div>
+    <div id="picker" class="overlay"><div id="pbox"><input id="q" placeholder="Type a ticker: BTC, PUMP, HYPE, NVDA…  (Enter = the market with the most history)" autocomplete="off" spellcheck="false"><div id="res"></div></div></div>
+  </div>
+</main>
 <footer id="foot"></footer>
+<div id="boot"></div>
 <script src="lightweight-charts.js"></script>
+<script src="static/ui.js"></script>
+<script src="static/settings.js"></script>
+<script src="static/draw.js"></script>
+<script src="static/app.js"></script>
 <script>
-(function(){
-  var LC = window.LightweightCharts, TF = ['1h','4h','1D','1W','1M'];
-  var P = {}; try { P = JSON.parse(localStorage.getItem('dollarbars') || '{}'); } catch (e) {}
-  var market = (location.hash || '').slice(1) || P.market || 'linear:BTCUSDT';
-  var mode = P.mode || 'dollar', sizes = P.sizes || {}, size = sizes[market] || null, tf = P.tf || '1D', logScale = !!P.log;
-  var meta = null, bars = [], forming = null, byTime = {}, loading = false, retryTimer = null, restarting = false, update = null;
-  var lastFullLoad = 0, qTimer = null, lastRows = [];
-  var save = function(){ sizes[market] = size; try { localStorage.setItem('dollarbars', JSON.stringify({market:market, mode:mode, sizes:sizes, tf:tf, log:logScale})); } catch (e) {} };
-  var fmtD = function(x){ return x >= 1e9 ? '$' + (x >= 1e10 ? (x/1e9).toFixed(0) : (x/1e9).toFixed(1)) + 'B' : x >= 1e6 ? '$' + (x >= 1e7 ? (x/1e6).toFixed(0) : (x/1e6).toFixed(1)) + 'M' : x >= 1e4 ? '$' + Math.round(x/1e3) + 'K' : x >= 1e3 ? '$' + (x/1e3).toFixed(1) + 'K' : '$' + Math.round(x); };
-  var fmtP = function(p){ if (p < 0) return '-' + fmtP(-p); if (p >= 1000) return p.toLocaleString('en-US',{maximumFractionDigits:0}); if (p >= 1) return p.toFixed(p >= 100 ? 1 : 2); if (!(p > 0)) return String(p); return p.toFixed(Math.min(20, 3 - Math.floor(Math.log10(p)))); };
-  var fmtT = function(t){ return new Date(t*1000).toISOString().slice(0,16).replace('T',' ') + 'Z'; };
-  var fmtDay = function(t){ return new Date(t*1000).toISOString().slice(0,10); };
-  var fmtMon = function(ms){ return new Date(ms).toISOString().slice(0,7); };
-  var fmtHrs = function(h){ return h >= 48 ? (h/24).toFixed(1) + ' days' : h >= 1 ? h.toFixed(1) + ' h' : Math.round(h*60) + ' min'; };
-  var key = function(){ return mode === 'dollar' ? 'd:' + size : 't:' + tf; };
-  var $ = function(id){ return document.getElementById(id); };
-  var esc = function(s){ return String(s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); };
-  var sameBar = function(a, b){ return a && b && a.t === b.t && a.o === b.o && a.h === b.h && a.l === b.l && a.c === b.c && a.d === b.d; };
-
-  var rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 14;     // the page's UI size, see html{font-size}
-  var chart = LC.createChart($('chart'), {
-    layout:{background:{type:'solid',color:'#0b0c0e'},textColor:'#a8adb8',fontSize:Math.round(rem * 12 / 14)},
-    grid:{vertLines:{color:'#16181d'},horzLines:{color:'#16181d'}},
-    crosshair:{mode:0}, rightPriceScale:{borderColor:'#23262d', mode: logScale ? 1 : 0},
-    timeScale:{borderColor:'#23262d',timeVisible:true,secondsVisible:false,rightOffset:6,barSpacing:8,minBarSpacing:2,
-      enableConflation:true},   // bars thinner than a pixel are drawn merged: a fully zoomed-out 57k-bar chart repaints in ~3 ms instead of ~34
-    localization:{priceFormatter:fmtP}
-  });
-  var series = chart.addSeries(LC.CandlestickSeries, {upColor:'#2ebd85',downColor:'#f23645',wickUpColor:'#2ebd85',wickDownColor:'#f23645',borderVisible:false,
-    priceFormat:{type:'price',precision:2,minMove:0.01}});
-  var scale = chart.priceScale('right');
-  new ResizeObserver(function(){ chart.applyOptions({width:$('chart').clientWidth, height:$('chart').clientHeight}); }).observe($('chart'));
-
-  // How far you can zoom out: until the whole history fits on screen. Short histories keep the 2 px floor (zooming out further would only add empty space).
-  var minSpacing = 2;
-  function fitLimit(){
-    var n = bars.length + (forming ? 1 : 0), w = chart.timeScale().width();
-    var m = n && w ? Math.min(2, w / (n + chart.timeScale().options().rightOffset)) : 2;
-    if (m !== minSpacing) { minSpacing = m; chart.applyOptions({timeScale:{minBarSpacing:m}}); }
-  }
-  chart.timeScale().subscribeSizeChange(fitLimit);
-  // Mouse-wheel zoom out while the newest bar is on screen keeps it pinned at the right edge, so history is added on the left
-  // until all of it fits. Zooming in, or out while scrolled back into history, centres on the mouse as before. Runs before the chart's own handler.
-  var pinned = false;
-  $('chart').addEventListener('wheel', function(e){
-    var r = chart.timeScale().getVisibleLogicalRange(), pin = e.deltaY > 0 && !!r && r.to >= bars.length + (forming ? 1 : 0) - 1;
-    if (pin !== pinned) { pinned = pin; chart.applyOptions({timeScale:{rightBarStaysOnScroll:pin}}); }
-  }, {capture:true, passive:true});
-
-  // A / L buttons on the price axis, like TradingView. Dragging the axis switches auto scale off; A puts it back.
-  $('bAuto').onclick = function(){ scale.applyOptions({autoScale: !scale.options().autoScale}); };
-  $('bLog').onclick = function(){ logScale = !logScale; scale.applyOptions({mode: logScale ? 1 : 0}); save(); };
-  setInterval(function(){ $('bAuto').className = scale.options().autoScale ? 'on' : ''; $('bLog').className = logScale ? 'on' : ''; }, 300);
-  $('bLog').className = logScale ? 'on' : '';
-
-  function candle(r){ return {time:r.t, open:r.o, high:r.h, low:r.l, close:r.c}; }
-  function precisionFor(px){ var p = px >= 1000 ? 0 : px >= 10 ? 2 : px >= 0.1 ? 4 : px >= 0.001 ? 6 : px >= 1e-5 ? 8 : px >= 1e-7 ? 10 : 12; series.applyOptions({priceFormat:{type:'price',precision:p,minMove:Math.pow(10,-p)}}); }
-  function setStatus(m, note){
-    var s = $('status'); s.className = m.sync === 'live' ? 'live' : (m.sync === 'backfilling' || m.sync === 'loading' || m.sync === 'queued') ? 'busy' : '';
-    var txt = note || (m.live_err && (m.sync || '').indexOf('failed') !== 0 ? m.sync + (m.sync === 'live' ? ' (last poll failed: ' : ' (last download attempt failed: ') + m.live_err + ', retrying)' : m.sync);
-    s.querySelector('span').textContent = txt + (m.last ? ' · last candle ' + fmtT(m.last).slice(11) : '') +
-      (m.updated ? ' · checked ' + new Date(m.updated*1000).toISOString().slice(11,19) + 'Z' : '');
-    var pr = $('prog');
-    if (m.sync === 'backfilling' && m.progress) {
-      pr.className = 'show'; $('progFill').style.width = m.progress.pct + '%'; $('progPct').textContent = m.progress.pct.toFixed(0) + '%';
-      $('progText').textContent = (m.notice || 'downloading minute candles') + ' · at ' + fmtDay(m.progress.at) + ' · the chart grows as they arrive';
-    } else if (m.sync === 'queued' || m.sync === 'loading') {
-      pr.className = 'show'; $('progFill').style.width = '0%'; $('progPct').textContent = ''; $('progText').textContent = m.sync === 'loading' ? 'loading candles from disk…' : 'waiting for the downloader…';
-    } else pr.className = '';
-  }
-  function setTicker(info){
-    if (!info) return;
-    $('tName').textContent = info.ticker || market;
-    $('tSub').textContent = (info.kind === 'perp' ? 'perp' : 'spot') + ' · Bybit ' + (info.symbol || '') + (info.name ? ' · ' + info.name : '');
-    $('star').className = info.watch ? 'on' : ''; $('star').textContent = info.watch ? '★' : '☆';
-    document.title = (info.ticker || market) + ' dollar bars';
-  }
-  function stats(){
-    var n = bars.length; if (!n) { $('stats').textContent = ''; return; }
-    var hrs = bars.map(function(b){ return (b.e - b.t)/3600; }).sort(function(a,b){ return a-b; });
-    var med = hrs[Math.floor(n/2)], last365 = bars.filter(function(b){ return b.e >= bars[n-1].e - 365*86400; }).length;
-    var months = {}, m0 = fmtDay(bars[0].t).slice(0,7), m1 = fmtDay(bars[n-1].t).slice(0,7);
-    for (var d = new Date(m0 + '-01T00:00:00Z'); d.toISOString().slice(0,7) <= m1; d.setUTCMonth(d.getUTCMonth()+1)) months[d.toISOString().slice(0,7)] = 0;
-    bars.forEach(function(b){ months[fmtDay(b.t).slice(0,7)]++; });
-    var full = Object.keys(months).filter(function(k){ return k !== m0 && k !== m1; });   // drop the two partial months
-    var busy = full.slice().sort(function(a,b){ return months[b]-months[a]; })[0], quiet = full.slice().sort(function(a,b){ return months[a]-months[b]; })[0];
-    var what = mode === 'dollar' ? 'bars of ' + fmtD(size) : tf + ' bars';
-    $('stats').innerHTML = '<b>' + n.toLocaleString() + '</b> ' + what + ' since ' + fmtDay(bars[0].t) +
-      (mode === 'dollar' ? ' · median bar <b>' + fmtHrs(med) + '</b> (fastest ' + fmtHrs(hrs[0]) + ', slowest ' + fmtHrs(hrs[n-1]) + ')' : '') +
-      (busy ? ' · busiest month <b>' + busy + '</b> ' + months[busy] + ' bars, quietest <b>' + quiet + '</b> ' + months[quiet] : '') +
-      ' · last 365 days <b>' + last365 + '</b>' + (forming ? ' · forming: ' + (mode === 'dollar' ? fmtD(forming.d) + ' of ' + fmtD(size) + ' (' + Math.round(forming.d/size*100) + '%)' : 'open since ' + fmtT(forming.t)) : '');
-  }
-  function render(reset){
-    byTime = {}; bars.forEach(function(b){ byTime[b.t] = b; });
-    var data = bars.map(candle);
-    if (forming) { byTime[forming.t] = forming; data.push(candle(forming)); }
-    if (data.length) precisionFor(data[data.length-1].close);
-    series.setData(data); fitLimit();
-    if (reset) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0, data.length - 260), to:data.length + 4}); scale.applyOptions({autoScale:true}); }
-    stats();
-  }
-  function scheduleRetry(){ clearTimeout(retryTimer); retryTimer = setTimeout(function(){ load(true); }, 3000); }
-  function load(reset){
-    if (loading) return Promise.resolve();
-    loading = true;
-    var mk = market;
-    return fetch('/bars?m=' + encodeURIComponent(mk)).then(function(r){ return r.json(); }).then(function(j){
-      if (mk !== market) return;                                            // the user moved on while this was in flight
-      if (j.error) { setStatus({sync:'error'}, j.error); $('empty').textContent = j.error; $('empty').className = 'show'; return; }
-      meta = j.meta; setStatus(meta); setTicker(meta.market); checkUpdate(meta);
-      if (!Object.keys(j.keys).length) {
-        $('empty').textContent = meta.sync.indexOf('failed') === 0 ? meta.sync : (meta.notice ? meta.notice + ' · ' : '') + (meta.sync === 'backfilling' ? 'first candles arriving…' : 'waiting for the server to load ' + (meta.market.ticker || mk) + '…') +
-          (meta.live_err ? ' — last attempt failed: ' + meta.live_err + ' (retrying)' : '');
-        $('empty').className = 'show'; $('stats').textContent = '';
-        if (meta.sync.indexOf('failed') !== 0) scheduleRetry();
-        return;
-      }
-      $('empty').className = '';
-      if (size === null || meta.sizes.indexOf(size) < 0) size = meta.auto_size;      // sizes are per market (the median day changes)
-      var sel = $('size'); sel.innerHTML = meta.sizes.map(function(s){ return '<option value="' + s + '"' + (s === size ? ' selected' : '') + '>' + fmtD(s) + (s === meta.auto_size ? ' (median day)' : '') + '</option>'; }).join('');
-      var tsel = $('tf'); if (!tsel.options.length) tsel.innerHTML = TF.map(function(t){ return '<option value="' + t + '"' + (t === tf ? ' selected' : '') + '>' + t + '</option>'; }).join('');
-      var k = j.keys[key()]; if (!k) { scheduleRetry(); return; }
-      bars = k.bars; forming = k.forming; lastFullLoad = Date.now(); save();
-      $('foot').textContent = meta.source + ', ' + fmtDay(meta.first) + ' → now. A dollar bar closes with the minute that brings its turnover to the chosen size, so each holds the size plus that minute\'s overflow. ' +
-        'The x-axis is bar order, not the clock: every bar is the same width however long it took. Bar times are open times.';
-      render(reset);
-    }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; if (mk !== market) load(true); });   // the user moved on meanwhile: load what they want now
-  }
-  function poll(){
-    if (restarting) return;
-    var kk = key(), mk = market;
-    fetch('/live?m=' + encodeURIComponent(mk)).then(function(r){ return r.json(); }).then(function(j){
-      if (restarting || mk !== market || j.error) return;
-      setStatus(j.meta); setTicker(j.meta.market); checkUpdate(j.meta);
-      if (kk !== key() || loading) return;                                   // a menu change is in flight: its load() will redraw
-      var k = j.keys[kk];
-      if (!k) { if (Object.keys(j.keys).length) load(true); return; }         // this size no longer exists (rebuilt after catch-up): reload
-      if (j.meta.sync === 'backfilling') { if (Date.now() - lastFullLoad > 15000) load(false); return; }   // history is growing: refresh the whole set now and then
-      if (k.n > bars.length + 1) return load(false);                          // missed more than one bar (laptop slept?): reload
-      if (k.n === bars.length + 1) {
-        if (bars.length && k.tail.length > 1 && !sameBar(k.tail[0], bars[bars.length-1])) return load(false);   // the previous bar was re-cut while we were not looking
-        var b = k.tail[k.tail.length-1]; bars.push(b); byTime[b.t] = b; series.update(candle(b));
-      }
-      else if (k.n === bars.length && k.n && !sameBar(k.tail[k.tail.length-1], bars[k.n-1])) {   // last bar re-cut with its fuller final minute
-        var r = k.tail[k.tail.length-1]; bars[k.n-1] = r; byTime[r.t] = r; series.update(candle(r));
-      }
-      forming = k.forming;
-      if (forming) { byTime[forming.t] = forming; series.update(candle(forming)); }
-      fitLimit(); stats();
-    }).catch(function(){ if (!restarting) setStatus({sync:'server not answering'}); });
-  }
-
-  // ticker picker: type, see spot/perp markets grouped by ticker with how far back each goes; Enter = deepest of the first group
-  function openPicker(){ $('picker').className = 'show'; $('q').value = ''; lastRows = []; $('res').innerHTML = ''; $('q').focus(); runSearch(''); }
-  function closePicker(){ $('picker').className = ''; }
-  $('tick').onclick = openPicker;
-  $('picker').onclick = function(e){ if (e.target === this) closePicker(); };
-  document.addEventListener('keydown', function(e){
-    if (e.key === 'Escape') closePicker();
-    else if (e.key === '/' && $('picker').className !== 'show' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'SELECT') { e.preventDefault(); openPicker(); }
-  });
-  $('q').oninput = function(){ clearTimeout(qTimer); lastRows = []; var v = this.value; qTimer = setTimeout(function(){ runSearch(v); }, 150); };
-  $('q').onkeydown = function(e){
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    var v = this.value.trim();
-    if (!v && lastRows.length) { go(lastRows[0].key); return; }
-    if (!v) return;
-    $('res').innerHTML = '<div class="hint">checking which market has the most history…</div>';
-    fetch('/pick?t=' + encodeURIComponent(v)).then(function(r){ return r.json(); }).then(function(j){
-      if (j.key) go(j.key); else $('res').innerHTML = '<div class="hint">' + (j.status && j.status !== 'ok' ? esc(j.status) : 'nothing on Bybit called "' + esc(v) + '"') + '</div>';
-    }).catch(function(){ $('res').innerHTML = '<div class="hint">server not answering</div>'; });
-  };
-  function runSearch(v){
-    fetch('/search?q=' + encodeURIComponent(v)).then(function(r){ return r.json(); }).then(function(j){
-      if ($('q').value.trim() !== v.trim()) return;
-      lastRows = j.rows || [];
-      if (j.status !== 'ok') { $('res').innerHTML = '<div class="hint">' + esc(j.status) + '</div>'; return; }
-      if (!lastRows.length) { $('res').innerHTML = '<div class="hint">' + (v ? 'nothing on Bybit matches "' + esc(v) + '" — try the coin name or symbol' : 'your watchlist is empty: open a ticker and press ☆') + '</div>'; return; }
-      var groups = [], byT = {};
-      lastRows.forEach(function(r){ if (!byT[r.ticker]) { byT[r.ticker] = {ticker:r.ticker, name:r.name, stock:r.stock, rows:[]}; groups.push(byT[r.ticker]); } byT[r.ticker].rows.push(r); });
-      var html = groups.slice(0, 40).map(function(g){
-        var known = g.rows.filter(function(r){ return r.first; }), best = null;
-        if (known.length) best = known.reduce(function(a, b){ return (b.first < a.first || (b.first === a.first && b.kind === 'perp' && a.kind !== 'perp')) ? b : a; });
-        return '<div class="grp"><div class="gh"><b>' + esc(g.ticker) + '</b><span>' + esc(g.name || '') + (g.stock ? ' · tokenized stock / stock perp' : '') + '</span>' +
-          (known.length ? '<em>since ' + fmtMon(best.first) + '</em>' : '<em>history: press Enter to check</em>') + '</div><div class="gm">' +
-          g.rows.map(function(r){
-            var cls = (r.key === market ? 'cur' : (best && r.key === best.key ? 'best' : ''));
-            return '<button data-key="' + esc(r.key) + '" class="' + cls + '">' + r.kind + ' ' + esc(r.symbol) +
-              ' <span class="tag">' + (r.first ? 'since ' + fmtMon(r.first) : r.first === 0 ? 'no candles' : 'depth ?') + (best && r.key === best.key ? ' ★ most history' : '') + (r.have ? ' · on disk' : '') + (r.status === 'backfilling' ? ' · downloading' : '') + '</span></button>';
-          }).join('') + '</div></div>';
-      }).join('');
-      if (!v && j.pending) html += '<div class="hint">' + j.pending + ' markets still to be depth-checked in the background</div>';
-      $('res').innerHTML = html;
-      Array.prototype.forEach.call($('res').querySelectorAll('button[data-key]'), function(b){ b.onclick = function(){ go(this.getAttribute('data-key')); }; });
-    }).catch(function(){ $('res').innerHTML = '<div class="hint">server not answering</div>'; });
-  }
-  function go(k){
-    closePicker();
-    if (k === market) return;
-    market = k; size = sizes[market] || null; bars = []; forming = null; meta = null;
-    history.replaceState(null, '', '#' + market);
-    series.setData([]); $('stats').textContent = ''; $('legend').textContent = 'hover a bar';
-    $('tName').textContent = k.split(':')[1]; $('tSub').textContent = 'loading…';
-    save(); load(true);
-  }
-  $('star').onclick = function(){
-    if (!meta || !meta.market) return;
-    var t = meta.market.ticker, on = $('star').className === 'on';
-    fetch('/watchlist?' + (on ? 'remove' : 'add') + '=' + encodeURIComponent(t)).then(function(r){ return r.json(); }).then(function(j){
-      meta.market.watch = j.watchlist.indexOf(t) >= 0; setTicker(meta.market);
-    });
-  };
-  window.addEventListener('hashchange', function(){ var k = location.hash.slice(1); if (k && k !== market) go(k); });
-
-  // update banner: the server reports when its own files changed; page-only changes reload, code changes restart it in place
-  function checkUpdate(m){
-    if (restarting) return;
-    if (!m || !m.update) { update = null; $('banner').className = ''; return; }
-    update = m.update;
-    $('bannerText').textContent = update.kind === 'reload'
-      ? 'Update available: ' + update.files.join(', ') + ' changed (page reload, instant)'
-      : 'Update available: ' + update.files.join(', ') + ' changed (server restart, about 10 s)';
-    $('banner').className = 'show';
-  }
-  $('bannerBtn').onclick = function(){
-    if (!update) return;
-    if (update.kind === 'reload') { location.reload(); return; }
-    restarting = true; $('bannerText').textContent = 'Restarting the server…'; $('bannerBtn').disabled = true; setStatus({sync:'restarting…'});
-    var oldPid = null, t0 = Date.now(), iv = null;
-    fetch('/restart').then(function(r){ return r.json(); }).then(function(j){
-      if (j.ok) { oldPid = j.pid; return; }
-      clearInterval(iv); restarting = false; $('bannerBtn').disabled = false; $('bannerText').textContent = 'Not yet: ' + (j.reason || 'try again in a minute');   // files still changing on disk
-    }).catch(function(){});
-    iv = setInterval(function(){
+  // The page and its scripts come from disk, the server that answers may be older (the app was reopened after an update was
+  // pulled but before "Update now"): then static/ is missing. Ask that server to restart onto the new files and reload.
+  if (!window.DBCApp) (function(){
+    var b = document.getElementById('boot');                     // styled inline: static/app.css may be missing too
+    b.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0b0c0e;color:#a8adb8;font:18px Segoe UI,sans-serif';
+    b.textContent = 'Finishing an update: restarting the chart server…';
+    var pid = null, t0 = Date.now();
+    (function ask(){
+      fetch('/restart').then(function(r){ return r.json(); }).then(function(j){ if (j.ok) pid = j.pid; }).catch(function(){})
+        .then(function(){ if (pid === null && Date.now() - t0 < 120000) setTimeout(ask, 5000); });
+    })();
+    var iv = setInterval(function(){
       fetch('/ping', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(j){
-        if (j.ok && oldPid !== null && j.pid !== oldPid) { clearInterval(iv); location.reload(); }   // the new copy answers: reload onto it
-        else if (Date.now() - t0 > 90000) { clearInterval(iv); $('bannerText').textContent = 'The server did not come back. Close this window and run launch.cmd again.'; }
+        if (j.ok && pid !== null && j.pid !== pid) { clearInterval(iv); location.reload(); }
       }).catch(function(){});
+      if (Date.now() - t0 > 150000) { clearInterval(iv); b.textContent = 'The chart server did not restart. Close this window and run launch.cmd again.'; }
     }, 1000);
-  };
-
-  function switchTo(m){
-    mode = m; $('bDollar').className = m === 'dollar' ? 'on' : ''; $('bTime').className = m === 'time' ? 'on' : '';
-    $('lSize').style.display = m === 'dollar' ? '' : 'none'; $('lTf').style.display = m === 'time' ? '' : 'none';
-    save(); load(true);
-  }
-  $('bDollar').onclick = function(){ switchTo('dollar'); };
-  $('bTime').onclick = function(){ switchTo('time'); };
-  $('size').onchange = function(){ size = +this.value; save(); load(true); };
-  $('tf').onchange = function(){ tf = this.value; save(); load(true); };
-  if (mode === 'time') { $('bDollar').className = ''; $('bTime').className = 'on'; $('lSize').style.display = 'none'; $('lTf').style.display = ''; }
-
-  chart.subscribeCrosshairMove(function(p){
-    if (!p || !p.time) return;
-    var r = byTime[p.time]; if (!r) return;
-    var chg = +(((r.c / r.o - 1) * 100).toFixed(2)), isForming = forming && r.t === forming.t;
-    var head = mode === 'dollar'
-      ? '<b>' + fmtT(r.t) + ' → ' + fmtT(r.e) + '</b> · ' + (isForming ? 'forming, ' : 'took ') + '<b>' + fmtHrs((r.e - r.t)/3600) + '</b> (' + r.n + ' min) · ' + fmtD(r.d) + (isForming ? ' of ' + fmtD(size) : '') + ' traded'
-      : '<b>' + (tf === '1h' || tf === '4h' ? fmtT(r.t) : fmtDay(r.t)) + '</b> (' + tf + (isForming ? ', forming' : '') + ') · ' + fmtD(r.d) + ' traded';
-    $('legend').innerHTML = head + '<br>O ' + fmtP(r.o) + ' · H ' + fmtP(r.h) + ' · L ' + fmtP(r.l) +
-      ' · C ' + fmtP(r.c) + ' · <span style="color:' + (chg >= 0 ? '#2ebd85' : '#f23645') + '">' + (chg > 0 ? '+' : '') + chg.toFixed(2) + '%</span>';
-  });
-
-  history.replaceState(null, '', '#' + market);
-  load(true).then(function(){ setInterval(poll, 5000); });
-})();
+  })();
 </script>
 </body>
 </html>

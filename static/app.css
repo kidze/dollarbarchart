@@ -1,0 +1,160 @@
+:root{--bg:#0b0c0e;--s1:#121316;--s2:#1a1c20;--s3:#22252b;--bd:#23262d;--bd2:#2f333b;--tx:#e6e8ec;--tx2:#a8adb8;--tx3:#6e7681;
+      --up:#2ebd85;--dn:#f23645;--acc:#2962ff;--acc2:#5cb8f2;--warn:#F2A33A}
+*{box-sizing:border-box}
+/* UI size: everything below is in rem, so this one number scales the whole page (the chart's axis text follows it too) */
+html{font-size:18px}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font-family:-apple-system,"Segoe UI",Inter,Roboto,sans-serif}
+body{display:flex;flex-direction:column;font-size:1rem;line-height:1.45}
+button{font:inherit;color:inherit}
+svg{display:block}
+
+/* top toolbar */
+#top{display:flex;flex-wrap:wrap;align-items:center;gap:.35rem;padding:.3rem .6rem;border-bottom:1px solid var(--bd);background:var(--s1);min-height:2.75rem}
+.tb{flex:none;background:transparent;border:0;border-radius:.3rem;color:var(--tx);cursor:pointer;padding:.25rem .5rem;height:2.1rem;display:flex;align-items:center}
+.tb:hover:not(:disabled){background:var(--s3)}
+.tb:disabled{color:var(--tx3);opacity:.5;cursor:default}
+.tb.icon{width:2.1rem;padding:0;justify-content:center}
+.tb.icon svg{width:1.55rem;height:1.55rem}
+#tick{font-weight:700;font-size:1.1rem;gap:.55rem;max-width:30rem}
+#tick small{font-weight:500;font-size:.84rem;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#star{color:var(--tx3);font-size:1.3rem}
+#star.on{color:var(--warn)}
+#top .grp{display:flex;flex:none;gap:.35rem}                    /* buttons that wrap to a second row together */
+.sep{width:1px;align-self:stretch;margin:.35rem .25rem;background:var(--bd2)}
+.seg{flex:none;display:inline-flex;border:1px solid var(--bd);border-radius:.4rem;overflow:hidden}
+.seg button{white-space:nowrap;background:transparent;color:var(--tx2);border:0;padding:.33rem .8rem;font-weight:600;cursor:pointer}
+.seg button:hover{color:var(--tx)}
+.seg button.on{background:var(--acc);color:#fff}
+select{background:var(--s2);color:var(--tx);border:1px solid var(--bd);border-radius:.4rem;padding:.3rem .5rem;font:inherit;font-weight:600}
+label{flex:none;white-space:nowrap;color:var(--tx3);font-size:.9rem;display:flex;align-items:center;gap:.4rem;margin-left:.3rem}
+#status{flex:1 1 14rem;min-width:0;text-align:right;font-size:.88rem;color:var(--tx3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:.6rem}   /* too little room: it moves to a second row */
+#unsaved{display:none;flex:none;color:var(--dn);font-size:.88rem;font-weight:600;white-space:nowrap;margin-left:.4rem;cursor:help}
+#unsaved.show{display:inline}
+#status i{display:inline-block;width:.57rem;height:.57rem;border-radius:50%;background:var(--tx3);margin-right:.43rem;vertical-align:middle}
+#status.live i{background:var(--up)}
+#status.busy i{background:var(--warn)}
+
+/* stats / download progress line */
+#sub{padding:.3rem 1rem;border-bottom:1px solid var(--bd);background:var(--s1);font-size:.88rem;color:var(--tx2);display:flex;flex-direction:column;gap:.2rem}
+#sub:empty{display:none}
+#stats b{color:var(--tx)}
+#prog{display:none;align-items:center;gap:.7rem}
+#prog.show{display:flex}
+#prog .bar{flex:1;height:.43rem;background:var(--s2);border-radius:.21rem;overflow:hidden}
+#prog .bar i{display:block;height:100%;background:var(--acc2);width:0}
+
+/* left drawing toolbar */
+main{flex:1;min-height:0;display:flex}
+#tools{width:2.75rem;flex:none;display:flex;flex-direction:column;align-items:center;gap:.2rem;padding:.4rem 0;border-right:1px solid var(--bd);background:var(--s1)}
+#tools button{width:2.2rem;height:2.2rem;padding:0;border:0;border-radius:.3rem;background:transparent;color:var(--tx2);cursor:pointer;display:flex;align-items:center;justify-content:center}
+#tools button svg{width:1.6rem;height:1.6rem}
+#tools button:hover{background:var(--s3);color:var(--tx)}
+#tools button.on{color:var(--acc2);background:rgba(41,98,255,.14)}
+#tools .hsep{width:1.6rem;height:1px;background:var(--bd2);margin:.25rem 0}
+#tHide .slash{display:none}
+#tHide.on .slash{display:inline}
+
+/* chart area */
+#wrap{position:relative;flex:1;min-width:0}
+#chart{position:absolute;inset:0}
+#legend{position:absolute;z-index:5;left:.8rem;top:.6rem;font-size:.9rem;color:var(--tx2);pointer-events:none;
+        font-variant-numeric:tabular-nums;background:rgba(11,12,14,.72);padding:.3rem .57rem;border-radius:.43rem}
+#legend b{color:var(--tx)}
+#axis{position:absolute;z-index:6;right:.43rem;bottom:.36rem;display:flex;gap:.2rem}
+#axis button{width:1.45rem;height:1.3rem;padding:0;border:1px solid var(--bd);border-radius:.3rem;background:var(--s1);color:var(--tx3);
+             font:700 .8rem/1 -apple-system,"Segoe UI",Inter,Roboto,sans-serif;cursor:pointer}
+#axis button.on{color:var(--acc2);border-color:var(--acc2)}
+#banner{position:absolute;z-index:9;left:50%;top:.86rem;transform:translateX(-50%);display:none;align-items:center;gap:.86rem;
+        background:var(--s2);border:1px solid var(--acc2);border-radius:.7rem;padding:.57rem .7rem .57rem 1rem;font-size:.93rem;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+#banner.show{display:flex}
+#banner button{background:var(--acc2);color:#08131c;border:0;border-radius:.5rem;padding:.43rem .86rem;font-weight:700;cursor:pointer}
+#empty{position:absolute;z-index:4;inset:0;display:none;align-items:center;justify-content:center;color:var(--tx3);font-size:1rem;text-align:center;padding:1.4rem;pointer-events:none}
+#empty.show{display:flex}
+footer{padding:.4rem 1rem;border-top:1px solid var(--bd);color:var(--tx3);font-size:.8rem;background:var(--s1)}
+#boot{display:none}
+
+/* symbol search */
+.overlay{position:absolute;z-index:20;inset:0;display:none;background:rgba(0,0,0,.55)}
+#picker{align-items:flex-start;justify-content:center;padding-top:2.85rem}
+#picker.show{display:flex}
+#pbox{width:40rem;max-width:95%;max-height:80%;display:flex;flex-direction:column;background:var(--s1);border:1px solid var(--bd);border-radius:.86rem;box-shadow:0 12px 40px rgba(0,0,0,.6)}
+#q{background:var(--s2);color:var(--tx);border:0;border-bottom:1px solid var(--bd);border-radius:.86rem .86rem 0 0;padding:.86rem 1rem;font:inherit;font-size:1.15rem;outline:none}
+#res{overflow:auto;padding:.43rem 0}
+#res .hint{padding:.7rem 1rem;color:var(--tx3);font-size:.9rem}
+.grp{padding:.43rem 1rem;border-bottom:1px solid var(--s2)}
+.grp:last-child{border-bottom:0}
+.gh{display:flex;align-items:baseline;gap:.57rem}
+.gh b{font-size:1.07rem}
+.gh span{color:var(--tx3);font-size:.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gh em{margin-left:auto;font-style:normal;color:var(--tx3);font-size:.82rem;white-space:nowrap}
+.gm{display:flex;flex-wrap:wrap;gap:.43rem;margin-top:.3rem}
+.gm button{background:var(--s2);color:var(--tx2);border:1px solid var(--bd);border-radius:.43rem;padding:.2rem .57rem;font-size:.9rem;cursor:pointer;font-variant-numeric:tabular-nums}
+.gm button:hover{border-color:var(--acc2);color:var(--tx)}
+.gm button.best{border-color:#2B9667;color:var(--tx)}
+.gm button.cur{background:var(--acc2);color:#08131c;border-color:var(--acc2)}
+.gm button .tag{color:var(--tx3);font-size:.8rem}
+.gm button.best .tag{color:var(--up)}
+
+/* floating toolbar of the selected drawing */
+#dtb{position:absolute;z-index:8;display:none;align-items:center;gap:.1rem;padding:.2rem;background:var(--s2);border:1px solid var(--bd2);border-radius:.45rem;box-shadow:0 4px 18px rgba(0,0,0,.5);user-select:none}
+#dtb.show{display:flex}
+#dtb .grip{width:.9rem;align-self:stretch;cursor:grab;background:radial-gradient(circle,var(--tx3) 1px,transparent 1.5px) 0 0/.3rem .3rem;opacity:.8;margin:0 .15rem}
+#dtb button{height:1.9rem;min-width:1.9rem;padding:0 .3rem;border:0;border-radius:.3rem;background:transparent;color:var(--tx2);cursor:pointer;display:flex;align-items:center;justify-content:center;gap:.25rem;font-size:.82rem}
+#dtb button:hover{background:var(--s3);color:var(--tx)}
+#dtb button.on{color:var(--acc2)}
+#dtb svg{width:1.35rem;height:1.35rem}
+#dtb .sw{width:1.15rem;height:1.15rem;border-radius:.2rem;border:1px solid rgba(255,255,255,.25)}
+
+/* menus (line width, line style) */
+.menu{position:fixed;z-index:40;background:var(--s2);border:1px solid var(--bd2);border-radius:.45rem;box-shadow:0 8px 28px rgba(0,0,0,.6);padding:.3rem 0;min-width:8rem}
+.menu button{display:flex;width:100%;align-items:center;gap:.6rem;padding:.35rem .8rem;border:0;background:transparent;color:var(--tx);cursor:pointer;text-align:left;font-size:.9rem}
+.menu button:hover{background:var(--s3)}
+.menu button.on{color:var(--acc2)}
+.menu svg{width:2.6rem;height:.9rem}
+
+/* dialogs */
+.modal{position:fixed;z-index:30;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)}
+.dlg{width:34rem;max-width:94vw;max-height:90vh;display:flex;flex-direction:column;background:var(--s1);border:1px solid var(--bd2);border-radius:.7rem;box-shadow:0 16px 50px rgba(0,0,0,.7)}
+.dlg h3{margin:0;padding:.9rem 1.2rem;font-size:1.1rem;font-weight:600;display:flex;align-items:center;cursor:move;user-select:none}
+.dlg h3 .x{margin-left:auto;background:transparent;border:0;color:var(--tx3);font-size:1.3rem;cursor:pointer;line-height:1}
+.dlg h3 .x:hover{color:var(--tx)}
+.dlg .tabs{display:flex;gap:1.2rem;padding:0 1.2rem;border-bottom:1px solid var(--bd)}
+.dlg .tabs button{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--tx2);padding:.45rem 0;cursor:pointer;font-weight:600}
+.dlg .tabs button.on{color:var(--tx);border-bottom-color:var(--tx)}
+.dlg .body{padding:1rem 1.2rem;overflow:auto;min-height:12rem}
+.dlg .sect{color:var(--tx3);font-size:.75rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin:.2rem 0 .7rem}
+.dlg .row{display:flex;align-items:center;gap:.7rem;min-height:2.2rem}
+.dlg .row .name{width:9rem;display:flex;align-items:center;gap:.55rem;color:var(--tx)}
+.dlg .row .ctl{display:flex;align-items:center;gap:.5rem}
+.dlg .foot{display:flex;align-items:center;gap:.6rem;padding:.8rem 1.2rem;border-top:1px solid var(--bd)}
+.dlg .foot .grow{flex:1}
+.btn{border:1px solid var(--bd2);background:transparent;color:var(--tx);border-radius:.4rem;padding:.4rem 1.1rem;cursor:pointer;font-weight:600}
+.btn:hover{background:var(--s3)}
+.btn.pri{background:var(--tx);color:#111;border-color:var(--tx)}
+.btn.pri:hover{background:#fff}
+.btn.link{border:0;color:var(--tx2);padding-left:0}
+.btn.link:hover{background:transparent;color:var(--tx)}
+input[type=checkbox]{width:1rem;height:1rem;accent-color:var(--acc);margin:0}
+.swatch{width:2rem;height:2rem;padding:.25rem;border:1px solid var(--bd2);border-radius:.35rem;background:transparent;cursor:pointer}
+.swatch:hover{border-color:var(--tx3)}
+.swatch i{display:block;width:100%;height:100%;border-radius:.2rem}
+.swatch:disabled{opacity:.35;cursor:default}
+.chk{background:repeating-conic-gradient(#808080 0 25%,#c0c0c0 0 50%) 0 0/.5rem .5rem}
+
+/* color picker */
+.cpick{position:fixed;z-index:50;background:var(--s2);border:1px solid var(--bd2);border-radius:.55rem;box-shadow:0 10px 32px rgba(0,0,0,.65);padding:.7rem;width:16.6rem;user-select:none}
+.cpick .grid{display:grid;grid-template-columns:repeat(10,1fr);gap:.2rem}
+.cpick .grid .gap{grid-column:1/-1;height:.35rem}
+.cpick .c{aspect-ratio:1;border-radius:.2rem;cursor:pointer;border:1px solid rgba(255,255,255,.08);padding:0}
+.cpick .c:hover{transform:scale(1.15)}
+.cpick .c.on{outline:2px solid var(--tx);outline-offset:1px}
+.cpick hr{border:0;border-top:1px solid var(--bd2);margin:.6rem 0}
+.cpick .custom{display:flex;flex-wrap:wrap;gap:.2rem;align-items:center}
+.cpick .custom .c{width:1.35rem}
+.cpick .add{width:1.35rem;height:1.35rem;border:1px dashed var(--tx3);border-radius:.2rem;background:transparent;color:var(--tx2);cursor:pointer;line-height:1;padding:0}
+.cpick .add:hover{color:var(--tx);border-color:var(--tx2)}
+.cpick .op{display:flex;align-items:center;gap:.6rem;margin-top:.15rem;font-size:.82rem;color:var(--tx2)}
+.cpick .op .track{flex:1;height:.75rem;border-radius:.4rem;position:relative;cursor:pointer}
+.cpick .op .track i{position:absolute;inset:0;border-radius:.4rem}
+.cpick .op .knob{position:absolute;top:50%;width:1rem;height:1rem;border-radius:50%;background:#fff;border:2px solid #555;transform:translate(-50%,-50%);pointer-events:none}
+.cpick .op input{width:3.3rem;background:var(--bg);color:var(--tx);border:1px solid var(--bd2);border-radius:.3rem;padding:.15rem .3rem;font:inherit;text-align:right}
