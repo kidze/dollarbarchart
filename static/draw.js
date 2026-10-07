@@ -30,7 +30,7 @@
     var colors = {get: function(){ return store.get('customColors') || []; }, set: function(l){ store.set('customColors', l); }};
 
     // ------------------------------------------------------------ geometry: anchors {t, p} <-> pane pixels
-    function paneH(){ return host.clientHeight - ts.height(); }
+    function paneH(){ return chart.paneSize().height; }            // the chart's own size (its box can be a pixel or two taller)
     function xOf(l){                                             // the chart maps only whole bar numbers to x (a fraction gives 0)
       var f = Math.floor(l), x0 = ts.logicalToCoordinate(f);
       if (x0 === null || l === f) return x0;

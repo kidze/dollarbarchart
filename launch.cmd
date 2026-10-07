@@ -33,8 +33,10 @@ for %%b in (msedge chrome) do (
     reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\%%b.exe" /ve >nul 2>&1 && set "BROWSER=%%b"
   )
 )
+rem No size or position flags: an Edge that is already running ignores them, and one started here would apply them to
+rem every window it opens afterwards. The page sizes and places its own window (static\window.js).
 if defined BROWSER (
-  start "" %BROWSER% --app=%URL% --window-size=1500,860
+  start "" %BROWSER% --app=%URL%
 ) else (
   start "" %URL%
 )
