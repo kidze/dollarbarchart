@@ -40,6 +40,8 @@
     }
     function apply(l){
       shown = l;
+      document.getElementById('chart').style.background = l.bg.type === 'gradient'   // the chart is whole even pixels: its box
+        ? 'linear-gradient(' + l.bg.top + ',' + l.bg.bottom + ')' : l.bg.color;        // shows round its edges in the same color
       app.chart.applyOptions({layout:{background: l.bg.type === 'gradient'
         ? {type:'gradient', topColor:l.bg.top, bottomColor:l.bg.bottom} : {type:'solid', color:l.bg.color}}});
       app.series.applyOptions({

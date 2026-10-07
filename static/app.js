@@ -146,7 +146,9 @@
     series = chart.addSeries(LC.CandlestickSeries, {upColor:'#2ebd85',downColor:'#f23645',wickUpColor:'#2ebd85',wickDownColor:'#f23645',borderVisible:false,
       priceFormat:{type:'price',precision:2,minMove:0.01}});
     scale = chart.priceScale('right');
-    new ResizeObserver(function(){ chart.applyOptions({width:$('chart').clientWidth, height:$('chart').clientHeight}); }).observe($('chart'));
+    new ResizeObserver(function(){                               // whole pixels that fit: rounding a 861.5 px box up to 862 made the page scroll sideways
+      var r = $('chart').getBoundingClientRect(); chart.applyOptions({width: Math.floor(r.width), height: Math.floor(r.height)});
+    }).observe($('chart'));
     chart.timeScale().subscribeSizeChange(fitLimit);
 
     // Mouse-wheel zoom out while the newest bar is on screen keeps it pinned at the right edge, so history is added on the left
@@ -411,6 +413,7 @@
   app.mode = function(){ return mode; };
 
   store.load().then(function(){
+    app.win = DBCWindow(store);                                   // the app window back to its last size and place
     makeChart();
     app.chart = chart; app.series = series;
     settings = app.settings = DBCSettings(app);

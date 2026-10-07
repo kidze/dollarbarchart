@@ -43,7 +43,8 @@ amount of market activity. TradingView does not draw them, so this does.
 Needs Python 3.10+ with `numpy`, `pandas` and `pyarrow` (`pip install -r requirements.txt`).
 
 * **Windows:** double-click `launch.cmd`. It starts the server (windowless), waits for it, and opens the
-  chart as its own window in Edge or Chrome (falls back to your default browser).
+  chart as its own window in Edge or Chrome (falls back to your default browser). The window opens at the
+  size and place you left it (the first time: 90% of the screen).
 * **macOS / Linux:** `sh launch.sh`.
 * **By hand:** `python server.py`, then open <http://127.0.0.1:8793/>.
 
@@ -80,6 +81,7 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 | `static/app.js` | loading and live-updating the chart, ticker picker, watchlist, stats, legend, update banner |
 | `static/draw.js` | the drawing tools (trend line), their toolbars and settings, undo/redo, saving |
 | `static/settings.js` | the chart settings dialog (candles, background) |
+| `static/window.js` | the app window's size and place, remembered between launches |
 | `static/ui.js`, `static/app.css` | color picker, menus, dialogs; the page's styles |
 | `lightweight-charts.js` | TradingView Lightweight Charts v5.2.1, vendored (Apache-2.0, logo must stay) |
 | `tests/` | bar-cutting, search, crash-safety and saved-drawings tests: `python tests/test_bars.py`, `python tests/test_markets.py`, `python tests/test_storage.py`, `python tests/test_userdata.py` (or `pytest`) |
