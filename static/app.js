@@ -243,9 +243,10 @@
   function load(reset){
     if (loading) return Promise.resolve();
     loading = true;
-    var mk = market;
-    return fetch('/bars?m=' + encodeURIComponent(mk) + '&k=' + encodeURIComponent(key())).then(function(r){ return r.json(); }).then(function(j){
+    var mk = market, kk = key(), moved = false;
+    return fetch('/bars?m=' + encodeURIComponent(mk) + '&k=' + encodeURIComponent(kk)).then(function(r){ return r.json(); }).then(function(j){
       if (mk !== market) return;                                            // the user moved on while this was in flight
+      if (kk !== key()) { moved = true; return; }                           // a menu change meanwhile: this answer holds the old set only
       if (j.error) { setStatus({sync:'error'}, j.error); $('empty').textContent = j.error; $('empty').className = 'show'; return; }
       meta = j.meta; setStatus(meta); setTicker(meta.market); checkUpdate(meta);
       if (!Object.keys(j.keys).length) {
@@ -265,7 +266,7 @@
       $('foot').textContent = meta.source + ', ' + fmtDay(meta.first) + ' → now. A dollar bar closes with the minute that brings its turnover to the chosen size, so each holds the size plus that minute\'s overflow. ' +
         'The x-axis is bar order, not the clock: every bar is the same width however long it took. Bar times are open times. Drawings are kept per market and placed by time, so they show on every bar size.';
       render(reset);
-    }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; if (mk !== market) load(true); });   // the user moved on meanwhile: load what they want now
+    }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; if (mk !== market || moved) load(true); });   // the user moved on meanwhile: load what they want now
   }
   function poll(){
     if (restarting) return;

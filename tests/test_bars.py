@@ -142,6 +142,15 @@ def test_median_sizes_per_period():
     assert set(md) == {"1h", "4h", "1D"}, md                      # three days: no whole week or month yet
 
 
+def test_nearest_size_matches_the_page_fallback():
+    """The server answers a gone size with the set the page will pick: the closest left on a log scale."""
+    sizes = [1.5e8, 5.2e8, 6.6e8, 1e9, 2.6e9, 5.2e9, 1e10, 2.6e10, 3.4e10, 5.2e10, 1.5e11]
+    assert B.nearest_size(sizes, "170000000", 5.2e9) == 1.5e8
+    assert B.nearest_size(sizes, "30000000000", 5.2e9) == 3.4e10
+    assert B.nearest_size(sizes, "1e13", 5.2e9) == 1.5e11
+    assert B.nearest_size(sizes, "null", 5.2e9) == 5.2e9 == B.nearest_size(sizes, "0", 5.2e9) == B.nearest_size(sizes, "x", 5.2e9)
+
+
 def test_upsert_replaces_same_minute_and_ignores_older():
     df = synthetic(100, seed=4)
     cd = B.Candles(df)

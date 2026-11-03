@@ -13,8 +13,9 @@ It also watches its own source files: once they have stopped changing for a minu
 calls /restart, which hands the port to a fresh copy of this server and exits; the page reconnects and
 reloads by itself.
 
-  /bars?m=&k=   full history of bar set k of a market (one call per page load or menu change); every set
-                when k is absent or not one of them (a size the page remembered that is gone)
+  /bars?m=&k=   full history of bar set k of a market (one call per page load or menu change); a dollar
+                size that is gone (or d:null) gets the nearest size left (the median day for null), the
+                same pick the page makes; every set when k is absent
   /live?m=      the last two completed bars + the forming bar of every set (polled every 5 s)
   /search?q=    markets matching what was typed (empty q = the watchlist)
   /pick?t=      resolve a ticker to the market with the most history (probes depth if unknown)
@@ -682,6 +683,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 m = touch(q.get("m", [DEFAULT_MARKET])[0])
                 with LOCK:
                     want = q.get("k", [""])[0]
+                    if m.sets and want.startswith("d:") and want not in m.sets:      # a size the page remembered is gone, or none yet
+                        want = B.size_key(B.nearest_size(m.meta["sizes"], want[2:], m.meta["auto_size"]))
                     sets = ({want: m.sets[want]} if want in m.sets else m.sets) if m.sets else {}
                     keys = {k: {"bars": v["bars"], "forming": v["forming"]} for k, v in sets.items()}
                     return self.js({"meta": meta_of(m), "keys": keys})

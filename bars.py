@@ -163,6 +163,18 @@ def sizes_for(auto: float, medians: dict = None) -> list:
     return sorted(s for s in out if s > 0)
 
 
+def nearest_size(sizes: list, want: str, auto: float) -> float:
+    """The size the page falls back to when the one it remembered is gone (the page's nearestSize does the same):
+    the closest left on a log scale, or the median day when it remembered none."""
+    try:
+        x = float(want)
+    except ValueError:
+        x = 0.0
+    if not x > 0 or not sizes:
+        return auto
+    return min(sizes, key=lambda s: abs(np.log(s / x)))
+
+
 def size_key(size: float) -> str:
     """Must equal the page's 'd:' + size (JS Number#toString): whole dollars without '.0', fractions in
     shortest round-trip form (only markets with a median day under $100 ever have fractional sizes)."""
