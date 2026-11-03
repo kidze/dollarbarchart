@@ -13,7 +13,8 @@ amount of market activity. TradingView does not draw them, so this does.
   history**; the list shows how far back each spot/perp market goes.
 * **Free data, no keys:** Bybit's public 1-minute candles with exchange-reported turnover, from each
   market's first trade to the current minute, polled every 5 s so the forming bar moves.
-* Bar sizes from a tenth of the market's median day to ten times it, plus ordinary time bars
+* Bar sizes from a tenth of the market's median day to ten times it, plus the median 1h, 4h, week and month
+  (last 365 days, whole UTC periods with trades), each labelled in the menu, plus ordinary time bars
   (1h, 4h, 1D, 1W, 1M) on the same chart for comparison.
 * TradingView-style chart (Lightweight Charts): drag the price or time axis to zoom, double-click to reset,
   `A` auto-scale and `L` log-scale buttons, OHLC + bar duration + dollars on hover, bar statistics in the
@@ -75,7 +76,7 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 | `bybit_sync.py` | keyless Bybit v5 kline requests; one parquet per market; streaming, resumable, checkpointed backfill that stops within one request when asked |
 | `markets.py` | instrument index (cached daily), ticker aliases (PUMPFUN → PUMP, NVDAX → NVDA), search ranking, deepest-history choice, watchlist file |
 | `bars.py` | dollar bars and time bars from the candles, incrementally as new minutes arrive; per-market size menu |
-| `server.py` | local HTTP server: `/bars?m=` (full history), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/drawings?m=`, `/settings`, `/static/…`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |
+| `server.py` | local HTTP server: `/bars?m=&k=` (full history of the set shown), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/drawings?m=`, `/settings`, `/static/…`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |
 | `userdata.py` | saved drawings (per market) and chart settings, written crash-safe like the candles; only the app's own page may change them |
 | `index.html` | the page layout: top bar, drawing toolbar, chart |
 | `static/app.js` | loading and live-updating the chart, ticker picker, watchlist, stats, legend, update banner |

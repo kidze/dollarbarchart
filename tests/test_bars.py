@@ -115,13 +115,40 @@ def test_live_poll_recuts_a_bar_closed_on_a_partial_minute():
 def test_size_keys_match_the_page():
     """The page builds its key as 'd:' + size with JS number formatting; the server must agree for every size."""
     for auto in (1.5, 37.0, 1.5e6, 5.5e9):
-        sizes = B.sizes_for(auto)
+        sizes = B.sizes_for(auto, {"1h": auto * 0.029, "4h": auto * 0.13, "1D": auto, "1W": auto * 6.5, "1M": auto * 29})
         keys = [B.size_key(s) for s in sizes]
         assert len(set(keys)) == len(sizes), keys
         for s, k in zip(sizes, keys):
             js = str(int(s)) if s == int(s) else repr(s)
             assert k == "d:" + js, (s, k)
     assert B.size_key(5.5e9) == "d:5500000000" and B.size_key(0.75) == "d:0.75"
+
+
+def test_median_sizes_per_period():
+    """$1M every minute for 400 days: whole periods hold exactly 60, 240, 1440 or 10,080 minutes' worth, months
+    30 or 31 days; partial periods at either end don't drag the medians down; all of them are in the menu."""
+    start = 1_700_000_000_000 // DAY_MS * DAY_MS + 7 * B.MINUTE         # not on a period boundary
+    ts = start + np.arange(400 * 1440) * B.MINUTE
+    one = np.ones(len(ts))
+    cd = B.Candles(pd.DataFrame({"ts": ts, "open": one, "high": one, "low": one, "close": one, "volume": one * 1e6, "turnover": one * 1e6}))
+    sets, meta = B.build_all(cd)
+    md = meta["medians"]
+    assert md["1h"] == 6e7 and md["4h"] == 2.4e8 and md["1D"] == meta["auto_size"] == 1.4e9 and md["1W"] == 1e10, md
+    assert md["1M"] in (4.3e10, 4.5e10), md
+    assert set(md.values()) <= set(meta["sizes"]) and all(B.size_key(s) in sets for s in md.values())
+    young = B.Candles(pd.DataFrame({"ts": ts[:3 * 1440], "open": one[:4320], "high": one[:4320], "low": one[:4320],
+                                    "close": one[:4320], "volume": one[:4320], "turnover": one[:4320] * 1e6}))
+    md = B.median_sizes(young, B.auto_size(young))
+    assert set(md) == {"1h", "4h", "1D"}, md                      # three days: no whole week or month yet
+
+
+def test_nearest_size_matches_the_page_fallback():
+    """The server answers a gone size with the set the page will pick: the closest left on a log scale."""
+    sizes = [1.5e8, 5.2e8, 6.6e8, 1e9, 2.6e9, 5.2e9, 1e10, 2.6e10, 3.4e10, 5.2e10, 1.5e11]
+    assert B.nearest_size(sizes, "170000000", 5.2e9) == 1.5e8
+    assert B.nearest_size(sizes, "30000000000", 5.2e9) == 3.4e10
+    assert B.nearest_size(sizes, "1e13", 5.2e9) == 1.5e11
+    assert B.nearest_size(sizes, "null", 5.2e9) == 5.2e9 == B.nearest_size(sizes, "0", 5.2e9) == B.nearest_size(sizes, "x", 5.2e9)
 
 
 def test_upsert_replaces_same_minute_and_ignores_older():

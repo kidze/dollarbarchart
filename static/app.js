@@ -21,6 +21,12 @@
   var fmtMon = function(ms){ return new Date(ms).toISOString().slice(0,7); };
   var fmtHrs = function(h){ return h >= 48 ? (h/24).toFixed(1) + ' days' : h >= 1 ? h.toFixed(1) + ' h' : Math.round(h*60) + ' min'; };
   var key = function(){ return mode === 'dollar' ? 'd:' + size : 't:' + tf; };
+  var MEDIAN = [['1h','median 1h'], ['4h','median 4h'], ['1D','median day'], ['1W','median week'], ['1M','median month']];
+  var sizeNote = function(s){
+    var md = meta.medians || {'1D': meta.auto_size}, n = MEDIAN.filter(function(m){ return md[m[0]] === s; }).map(function(m){ return m[1]; });
+    return n.length ? ' (' + n.join(', ') + ')' : '';
+  };
+  var nearestSize = function(list, s){ return list.reduce(function(a, b){ return Math.abs(Math.log(b/s)) < Math.abs(Math.log(a/s)) ? b : a; }); };
   var sameBar = function(a, b){ return a && b && a.t === b.t && a.o === b.o && a.h === b.h && a.l === b.l && a.c === b.c && a.d === b.d; };
 
   // ---------------------------------------------------------------- saving to the server
@@ -237,9 +243,10 @@
   function load(reset){
     if (loading) return Promise.resolve();
     loading = true;
-    var mk = market;
-    return fetch('/bars?m=' + encodeURIComponent(mk)).then(function(r){ return r.json(); }).then(function(j){
+    var mk = market, kk = key(), moved = false;
+    return fetch('/bars?m=' + encodeURIComponent(mk) + '&k=' + encodeURIComponent(kk)).then(function(r){ return r.json(); }).then(function(j){
       if (mk !== market) return;                                            // the user moved on while this was in flight
+      if (kk !== key()) { moved = true; return; }                           // a menu change meanwhile: this answer holds the old set only
       if (j.error) { setStatus({sync:'error'}, j.error); $('empty').textContent = j.error; $('empty').className = 'show'; return; }
       meta = j.meta; setStatus(meta); setTicker(meta.market); checkUpdate(meta);
       if (!Object.keys(j.keys).length) {
@@ -250,15 +257,16 @@
         return;
       }
       $('empty').className = '';
-      if (size === null || meta.sizes.indexOf(size) < 0) size = meta.auto_size;      // sizes are per market (the median day changes)
-      var sel = $('size'); sel.innerHTML = meta.sizes.map(function(s){ return '<option value="' + s + '"' + (s === size ? ' selected' : '') + '>' + fmtD(s) + (s === meta.auto_size ? ' (median day)' : '') + '</option>'; }).join('');
+      if (size === null) size = meta.auto_size;
+      else if (meta.sizes.indexOf(size) < 0) size = nearestSize(meta.sizes, size);    // the medians moved since: the closest size left
+      var sel = $('size'); sel.innerHTML = meta.sizes.map(function(s){ return '<option value="' + s + '"' + (s === size ? ' selected' : '') + '>' + fmtD(s) + sizeNote(s) + '</option>'; }).join('');
       var tsel = $('tf'); if (!tsel.options.length) tsel.innerHTML = TF.map(function(t){ return '<option value="' + t + '"' + (t === tf ? ' selected' : '') + '>' + t + '</option>'; }).join('');
       var k = j.keys[key()]; if (!k) { scheduleRetry(); return; }
       bars = k.bars; forming = k.forming; lastFullLoad = Date.now(); save();
       $('foot').textContent = meta.source + ', ' + fmtDay(meta.first) + ' → now. A dollar bar closes with the minute that brings its turnover to the chosen size, so each holds the size plus that minute\'s overflow. ' +
         'The x-axis is bar order, not the clock: every bar is the same width however long it took. Bar times are open times. Drawings are kept per market and placed by time, so they show on every bar size.';
       render(reset);
-    }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; if (mk !== market) load(true); });   // the user moved on meanwhile: load what they want now
+    }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; if (mk !== market || moved) load(true); });   // the user moved on meanwhile: load what they want now
   }
   function poll(){
     if (restarting) return;
