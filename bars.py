@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 SIZE_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10]        # dollar sizes offered = the market's median day x these
+MEDIAN_TFS = ["1h", "4h", "1W", "1M"]            # also offered: the median hour, 4 hours, week and month
 TIMEFRAMES = ["1h", "4h", "1D", "1W", "1M"]
 MINUTE = 60_000
 DAY = 86_400_000
@@ -137,10 +138,28 @@ def auto_size(cd: Candles) -> float:
     return float(f"{med:.2g}")
 
 
-def sizes_for(auto: float) -> list:
-    """The menu: the median day and a few multiples either side, each rounded to two significant figures."""
+def median_sizes(cd: Candles, auto: float) -> dict:
+    """Median turnover of a 1h, 4h, day, week and month over the last 365 days, counting whole periods only
+    (the same UTC periods as the time bars), rounded like auto_size. The day is auto_size; a period the
+    market has no whole one of yet (a week-old coin has no whole month) is left out."""
+    n = cd.n
+    m = cd.ts[:n] >= cd.ts[n - 1] - 365 * DAY
+    ts, d = cd.ts[:n][m], cd.d[:n][m]
+    out = {"1D": auto}
+    for tf in MEDIAN_TFS:
+        per = pd.Series(d).groupby(period_start(ts, tf)).sum()
+        med = float(per.iloc[1:-1].median()) if len(per) > 2 else 0.0      # drop the two partial periods
+        if med > 0:
+            out[tf] = float(f"{med:.2g}")
+    return out
+
+
+def sizes_for(auto: float, medians: dict = None) -> list:
+    """The menu: the median day and a few multiples either side, plus the other medians, each rounded to two
+    significant figures."""
     out = {float(f"{auto * k:.2g}") for k in SIZE_STEPS}
     out.add(auto)
+    out.update((medians or {}).values())
     return sorted(s for s in out if s > 0)
 
 
@@ -153,7 +172,8 @@ def size_key(size: float) -> str:
 def build_all(cd: Candles) -> tuple[dict, dict]:
     """All bar sets from scratch. Returns (sets, meta)."""
     auto = auto_size(cd)
-    sizes = sizes_for(auto)
+    medians = median_sizes(cd, auto)
+    sizes = sizes_for(auto, medians)
     sets = {}
     for s in sizes:
         bars, forming, st = dollar_bars(cd, s)
@@ -161,7 +181,7 @@ def build_all(cd: Candles) -> tuple[dict, dict]:
     for tf in TIMEFRAMES:
         bars, forming, st = time_bars(cd, tf)
         sets["t:" + tf] = {"bars": bars, "forming": forming, "start": st, "tf": tf}
-    meta = {"auto_size": auto, "sizes": sizes, "timeframes": TIMEFRAMES,
+    meta = {"auto_size": auto, "sizes": sizes, "medians": medians, "timeframes": TIMEFRAMES,
             "first": int(cd.ts[0] // 1000), "last": int(cd.ts[cd.n - 1] // 1000), "n_candles": int(cd.n)}
     cd.touched = cd.n
     return sets, meta
