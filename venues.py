@@ -654,6 +654,212 @@ class Bitstamp(Venue):
         return [r for r in self._rows(_get(f"{self.API}/ohlc/{symbol}/?step=60&limit={n}", timeout=10, attempts=1)) if r[5] > 0]
 
 
+# ---------------------------------------------------------------- Kraken (archive + trades + OHLC, base volume, BTC 1m since 2013-10)
+
+class _Ranged(io.RawIOBase):
+    """Byte-split zip parts on a web server read as one seekable file, a block at a time with HTTP range requests:
+    zipfile reads the directory and one entry without the rest of the archive (Kraken's is 9.5 GB)."""
+    BLOCK = 4 << 20
+
+    def __init__(self, urls: list, sizes: list, stop=None):
+        self.urls, self.sizes, self.total, self.pos, self.stop = urls, sizes, sum(sizes), 0, stop
+        self.cache = {}
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.pos
+
+    def seek(self, off, whence=0):
+        self.pos = off if whence == 0 else self.pos + off if whence == 1 else self.total + off
+        return self.pos
+
+    def _block(self, b: int) -> bytes:
+        if b not in self.cache:
+            lo, hi = b * self.BLOCK, min(self.total, (b + 1) * self.BLOCK) - 1
+            out, start = b"", 0
+            for url, n in zip(self.urls, self.sizes):
+                a, z = max(lo, start), min(hi, start + n - 1)
+                if a <= z:
+                    for attempt in range(6):
+                        try:
+                            req = urllib.request.Request(url, headers=dict(UA, Range=f"bytes={a - start}-{z - start}"))
+                            with urllib.request.urlopen(req, timeout=60) as r:
+                                part = r.read()
+                            if len(part) != z - a + 1:
+                                raise IOError("short range read")
+                            out += part
+                            break
+                        except Exception:
+                            if attempt == 5 or (self.stop and self.stop()):
+                                raise
+                            time.sleep(2.0 * (attempt + 1))
+                start += n
+            if len(self.cache) >= 3:
+                self.cache.pop(next(iter(self.cache)))
+            self.cache[b] = out
+        return self.cache[b]
+
+    def readinto(self, buf) -> int:
+        n = min(len(buf), self.total - self.pos)
+        got = 0
+        while got < n:
+            b, off = divmod(self.pos, self.BLOCK)
+            chunk = self._block(b)[off:off + n - got]
+            buf[got:got + len(chunk)] = chunk
+            got += len(chunk)
+            self.pos += len(chunk)
+        return got
+
+
+class Kraken(Venue):
+    """History from Kraken's free OHLCVT archive (1-minute candles of every pair from its first trade, a zip in
+    byte-split parts: only the pair's entry is read, with range requests), then its public trades summed into
+    minutes up to the last 11 hours, which its OHLC endpoint serves (720 minutes)."""
+    name = "kraken"
+    title = "Kraken"
+    window = 1440                                                # minutes per forward request after the archive (trades paged inside)
+    pause = 1.05                                                 # public endpoints: about one request a second
+    exact_dollars = False                                        # the archive's candles carry coin volume: dollars = volume x close
+    drop_empty = True
+    quotes = ("USD", "USDT", "USDC")
+    API = "https://api.kraken.com/0/public"
+    ARCHIVE = "https://assets.kraken.com/marketing/institutions/Kraken_OHLCVT_Full.zip.part{:02d}"
+    ALIASES = {"XBT": "BTC", "XDG": "DOGE"}
+    OHLC_SPAN = 11 * HOUR                                        # windows younger than this come from the OHLC endpoint
+    CHUNK = 100_000
+
+    def __init__(self):
+        self._parts = None
+
+    def _call(self, path: str, stop=None, attempts: int = 6):
+        """A public endpoint's result; its errors come in a 200 body: a rate limit is waited out, an unknown pair
+        is a LookupError."""
+        for attempt in range(attempts):
+            r = _get(f"{self.API}/{path}", stop=stop, attempts=attempts)
+            err = (r or {}).get("error") or []
+            if not err:
+                return r.get("result") or {}
+            text = "; ".join(map(str, err))
+            if "Unknown asset pair" in text or "Invalid arguments" in text:
+                raise LookupError(f"kraken: {text}")
+            if attempt == attempts - 1 or (stop and stop()):
+                raise RuntimeError(f"kraken: {text}")
+            time.sleep(5.0 * (attempt + 1))
+        return {}
+
+    def instruments(self) -> list:
+        out = []
+        for it in self._call("AssetPairs").values():
+            base, _, quote = str(it.get("wsname") or "").partition("/")
+            if quote not in STABLE or str(it.get("altname", "")).endswith(".d") or it.get("status", "online") != "online":
+                continue
+            out.append({"symbol": it["altname"], "base": self.ALIASES.get(base, base), "quote": quote, "kind": "spot", "list_ms": 0})
+        return out
+
+    def label(self, symbol: str, kind: str) -> str:
+        return f"Kraken {symbol}"
+
+    # the archive
+    def _zip(self, stop=None):
+        if self._parts is None:
+            urls, sizes = [], []
+            for k in range(100):
+                try:
+                    with urllib.request.urlopen(urllib.request.Request(self.ARCHIVE.format(k), method="HEAD", headers=UA), timeout=30) as r:
+                        sizes.append(int(r.headers["Content-Length"]))
+                        urls.append(self.ARCHIVE.format(k))
+                except urllib.error.HTTPError as e:
+                    if e.code == 404 and urls:
+                        break
+                    raise
+            self._parts = (urls, sizes)
+        return zipfile.ZipFile(io.BufferedReader(_Ranged(*self._parts, stop=stop), 1 << 20))
+
+    def stream(self, symbol: str, after_ms: int, stop=None):
+        """The archive's 1-minute rows of a pair newer than after_ms, in chunks (none when the pair is not in it)."""
+        z = self._zip(stop)
+        name = f"{symbol}_1.csv"
+        if name not in z.namelist():
+            return
+        with z.open(name) as fh:
+            chunk = []
+            for line in io.TextIOWrapper(fh, encoding="ascii"):
+                x = line.split(",")
+                if len(x) < 6:
+                    continue
+                t = int(x[0]) * 1000
+                if t <= after_ms:
+                    continue
+                v, c = float(x[5]), float(x[4])
+                chunk.append([t, float(x[1]), float(x[2]), float(x[3]), c, v, v * c])
+                if len(chunk) >= self.CHUNK:
+                    yield chunk
+                    chunk = []
+                    if stop and stop():
+                        return
+            if chunk:
+                yield chunk
+
+    def first_ms(self, symbol: str):
+        for chunk in self.stream(symbol, -1):
+            return chunk[0][0]
+        trades = self._trades(symbol, 0)[0]                      # a pair younger than the archive: its first trade
+        return trades[0][0] // MINUTE * MINUTE if trades else None
+
+    # after the archive
+    def _trades(self, symbol: str, since_ns: int, stop=None) -> tuple:
+        """([[ms, price, volume], ...] from since, the next cursor)."""
+        r = self._call(f"Trades?pair={symbol}&since={int(since_ns)}&count=1000", stop=stop)
+        rows = next((v for k, v in r.items() if k != "last"), [])
+        return [[int(float(x[2]) * 1000), float(x[0]), float(x[1])] for x in rows], int(r.get("last") or 0)
+
+    @staticmethod
+    def _minutes(trades: list) -> list:
+        out = {}
+        for t, p, v in trades:
+            m = t // MINUTE * MINUTE
+            r = out.get(m)
+            if r is None:
+                out[m] = [m, p, p, p, p, v, p * v]
+            else:
+                r[2], r[3], r[4] = max(r[2], p), min(r[3], p), p
+                r[5] += v
+                r[6] += p * v
+        return [out[m] for m in sorted(out)]
+
+    def _ohlc(self, symbol: str, since_ms: int, stop=None, attempts: int = 6) -> list:
+        r = self._call(f"OHLC?pair={symbol}&interval=1&since={int(since_ms) // 1000 - 60}", stop=stop, attempts=attempts)
+        rows = next((v for k, v in r.items() if k != "last"), [])
+        # [time s, open, high, low, close, vwap, volume, count]: dollars = vwap x volume
+        return [[int(x[0]) * 1000, float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[6]), float(x[5]) * float(x[6])] for x in rows]
+
+    def fetch(self, symbol: str, start_ms: int, end_ms: int, stop=None) -> list:
+        now = int(time.time() * 1000)
+        if start_ms >= now - self.OHLC_SPAN:
+            return [r for r in self._ohlc(symbol, start_ms, stop) if start_ms <= r[0] <= end_ms]
+        trades, since = [], int(start_ms) * 1_000_000
+        while not (stop and stop()):
+            page, nxt = self._trades(symbol, since, stop)
+            trades.extend(x for x in page if start_ms <= x[0] <= end_ms)
+            if len(page) < 1000 or page[-1][0] > end_ms or nxt <= since:
+                break
+            since = nxt
+            time.sleep(self.pause)
+        rows = self._minutes(trades)
+        if rows and rows[-1][0] < min(end_ms, now) // MINUTE * MINUTE and not (stop and stop()):
+            rows.append([min(end_ms, now) // MINUTE * MINUTE, rows[-1][4], rows[-1][4], rows[-1][4], rows[-1][4], 0.0, 0.0])
+        return rows                                              # (a zero-volume marker at the window's end: the sync moves past a quiet tail)
+
+    def latest(self, symbol: str, n: int = 3) -> list:
+        rows = self._ohlc(symbol, int(time.time() * 1000) - (n + 1) * MINUTE, attempts=1)
+        return [r for r in rows if r[5] > 0][-n:]
+
+
 # ---------------------------------------------------------------- Bybit, through bybit_sync, so a combined market treats it like the others
 
 class Bybit(Venue):
@@ -675,10 +881,10 @@ class Bybit(Venue):
         return X.kline(*X.parse(symbol), "1", limit=n, attempts=1, timeout=10)
 
 
-VENUES = {v.name: v for v in (Binance(), Bybit(), OKX(), Coinbase(), Bitstamp(), KuCoin(), Bitfinex())}
+VENUES = {v.name: v for v in (Binance(), Bybit(), OKX(), Coinbase(), Bitstamp(), Kraken(), KuCoin(), Bitfinex())}
 # whose prices decide a minute nobody traded in (the price itself is the dollar-weighted median of the venues that did)
-PRIORITY = ["binance", "bybit", "okx", "coinbase", "bitstamp", "kucoin", "bitfinex"]
-DOWNLOAD_ORDER = ["binance", "bybit", "kucoin", "bitfinex", "coinbase", "bitstamp", "okx"]
+PRIORITY = ["binance", "bybit", "okx", "coinbase", "bitstamp", "kraken", "kucoin", "bitfinex"]
+DOWNLOAD_ORDER = ["binance", "bybit", "kucoin", "bitfinex", "coinbase", "bitstamp", "kraken", "okx"]
 
 
 # ---------------------------------------------------------------- files
@@ -907,6 +1113,20 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
             side["first"] = first
             side["history_done"] = True                          # forward venues start at the first candle
             span = max(1, now_ms - first)
+            if hasattr(venue, "stream") and not side.get("stream_done"):   # a venue's archive first (Kraken), resumable
+                streamed = None
+                for chunk in venue.stream(symbol, int(frame["ts"].iloc[-1]) if len(frame) else -1, stop=stop):
+                    take(chunk)
+                    streamed = chunk[-1][0]
+                    if progress:
+                        progress(min(100.0, (streamed - first) / span * 100), streamed)
+                    if stop and stop():
+                        return finish("stopped")
+                if stop and stop():
+                    return finish("stopped")
+                side["stream_done"] = True
+                if streamed is not None:
+                    cursor = max(cursor, streamed + MINUTE)
             while True:
                 if stop and stop():
                     return finish("stopped")

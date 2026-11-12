@@ -10,7 +10,7 @@ amount of market activity. TradingView does not draw them, so this does.
 ![BTC dollar bars](docs/screenshot.png)
 
 * **Combined across exchanges (the default).** A ticker's chart is every exchange that lists it, spot and
-  perpetual: Binance, Bybit, OKX, Coinbase, Bitstamp, KuCoin, Bitfinex. Dollars are summed; each minute's open,
+  perpetual: Binance, Bybit, OKX, Coinbase, Bitstamp, Kraken, KuCoin, Bitfinex. Dollars are summed; each minute's open,
   high, low and close is the dollar-weighted median of the exchanges that traded it, so one exchange's bad print
   cannot move the chart. A price 2x away from the minutes around it that no second exchange shows within a
   minute is a bad print even when nobody can outvote it (Bitfinex sold BTC at $0.01 in April 2013, when it was
@@ -27,12 +27,15 @@ amount of market activity. TradingView does not draw them, so this does.
   many exchanges and markets are in; hover it for the list.
 * **Any ticker.** Type `PUMP`, `HYPE`, `NVDA`… Enter opens the combined chart; the picker also lists each
   Bybit spot/perp market on its own, with how far back it goes.
-* **Free data, no keys:** public 1-minute candles with exchange-reported turnover (Coinbase, Bitstamp and
-  Bitfinex report coin volume, so their dollars are volume × close), from each market's first trade to the current
+* **Free data, no keys:** public 1-minute candles with exchange-reported turnover (Coinbase, Bitstamp, Kraken
+  and Bitfinex report coin volume, so their dollars are volume × close), from each market's first trade to the current
   minute, polled every 5 s so the forming bar moves. Binance's history comes from its public archive
   (data.binance.vision, one file per month) and its live minutes from its websocket stream, so the app adds
   almost nothing to the request weight other Binance users on the same machine spend. Binance's archive is
-  licensed for personal, non-commercial use.
+  licensed for personal, non-commercial use. Kraken's history comes from its free OHLCVT archive (1-minute
+  candles of every pair from its first trade: ETH from 2015-08, ZEC from 2016-10; a 9.5 GB zip of which only
+  the pair's file is read, with range requests), the weeks after the archive from its public trades summed into
+  minutes (about one request a second: BTC's first download takes a while), the last hours from its OHLC feed.
 * Bar sizes from a tenth of the market's median day to ten times it, plus the median 1h, 4h, week and month
   (last 365 days, whole UTC periods with trades), each labelled in the menu, plus ordinary time bars
   (1h, 4h, 1D, 1W, 1M) on the same chart for comparison.
@@ -110,7 +113,7 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 |---|---|
 | `bybit_sync.py` | keyless Bybit v5 kline requests; one parquet per market; streaming, resumable, checkpointed backfill that stops within one request when asked |
 | `markets.py` | instrument index (cached daily), ticker aliases (PUMPFUN → PUMP, NVDAX → NVDA), search ranking, deepest-history choice, watchlist file |
-| `venues.py` | the other exchanges' 1-minute candles (Binance archive + REST + websocket, OKX, Coinbase, Bitstamp, KuCoin, Bitfinex with its coarser candles for minute holes, and Bybit wrapped alike); one parquet per series in `data/<exchange>_<symbol>.parquet`; resumable syncs; which market means a ticker on each exchange |
+| `venues.py` | the other exchanges' 1-minute candles (Binance archive + REST + websocket, OKX, Coinbase, Bitstamp, Kraken archive + trades + OHLC, KuCoin, Bitfinex with its coarser candles for minute holes, and Bybit wrapped alike); one parquet per series in `data/<exchange>_<symbol>.parquet`; resumable syncs; which market means a ticker on each exchange |
 | `combined.py` | the merge (dollars summed, dollar-weighted median prices), the repair of bad prints no second exchange confirms, and the same-coin history check |
 | `bars.py` | dollar bars and time bars from the candles, incrementally as new minutes arrive; per-market size menu |
 | `server.py` | local HTTP server: `/bars?m=&k=` (full history of the set shown), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/drawings?m=`, `/settings`, `/static/…`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |

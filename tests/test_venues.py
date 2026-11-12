@@ -650,6 +650,70 @@ def test_bitstamp_finds_the_first_candle_of_a_pair_listed_years_after_it_opened(
     finally:
         V._get = real
 
+
+class FakeArchive(Fake):
+    """A Kraken-like venue: an archive streamed in chunks for the first rows, its API for the rest."""
+    def __init__(self, df, now_ms, archived):
+        super().__init__(df, now_ms)
+        self.archived, self.streams = archived, []
+
+    def stream(self, symbol, after_ms, stop=None):
+        self.streams.append(after_ms)
+        rows = rows_of(self.archived[self.archived["ts"] > after_ms])
+        for i in range(0, len(rows), 100):
+            yield rows[i:i + 100]
+            if stop and stop():
+                return
+
+    def fetch(self, symbol, start_ms, end_ms, stop=None):
+        assert start_ms > int(self.archived["ts"].iloc[-1]), "the API is asked only for what the archive does not have"
+        return super().fetch(symbol, start_ms, end_ms, stop)
+
+
+def test_an_archive_is_streamed_first_resumes_after_a_stop_and_the_api_takes_over():
+    scratch()
+    full = series(T0, 900, seed=20)
+    v = FakeArchive(full, int(full["ts"].iloc[-1]), full.iloc[:600])
+    chunks = {"n": 0}
+    orig = v.stream
+
+    def counted(symbol, after_ms, stop=None):
+        for c in orig(symbol, after_ms, stop):
+            chunks["n"] += 1
+            yield c
+    v.stream = counted
+    res = V.sync(v, "K", stop=lambda: chunks["n"] >= 2)
+    side = V.load_side("fake", "K")
+    assert res["result"] == "stopped" and res["n"] == 200 and not side.get("stream_done")
+    res = V.sync(v, "K")
+    assert res["result"] == "done" and V.load_side("fake", "K")["stream_done"]
+    assert v.streams == [-1, T0 + 199 * M]                           # resumed after the last stored minute
+    assert V.load("fake", "K")["ts"].tolist() == full["ts"].tolist()
+    n0, s0 = v.requests, len(v.streams)
+    V.sync(v, "K")
+    assert len(v.streams) == s0 and v.requests - n0 == 1             # streamed once: later syncs use the API only
+
+
+def test_kraken_trades_become_minutes_and_a_window_moves_past_a_quiet_tail():
+    k = V.Kraken()
+    t = T0
+    trades = [[t + 1000, 10.0, 1.0], [t + 2000, 12.0, 2.0], [t + 59000, 9.0, 1.0], [t + M + 5, 11.0, 3.0]]
+    assert k._minutes(trades) == [[t, 10.0, 12.0, 9.0, 9.0, 4.0, 10.0 + 24.0 + 9.0], [t + M, 11.0, 11.0, 11.0, 11.0, 3.0, 33.0]]
+    pages = [[[t + i * 30_000, 100.0 + i, 1.0] for i in range(1000)], [[t + 1000 * 30_000 + i, 50.0, 1.0] for i in range(3)]]
+    calls = []
+
+    def fake_trades(symbol, since_ns, stop=None):
+        calls.append(since_ns)
+        page = pages[len(calls) - 1] if len(calls) <= len(pages) else []
+        return page, (page[-1][0] * 1_000_000 if page else since_ns)
+    k._trades = fake_trades
+    set_now(t + 10 * V.DAY)
+    end = t + 1440 * M - 1
+    rows = k.fetch("XBTUSD", t, end)
+    assert calls[0] == t * 1_000_000 and len(calls) == 2             # paged until the trades ran past nothing more
+    assert rows[0][0] == t and rows[-1] == [end // M * M, rows[-2][4], rows[-2][4], rows[-2][4], rows[-2][4], 0.0, 0.0]
+    assert all(r[5] > 0 for r in rows[:-1]) and sum(r[5] for r in rows) == 1003.0
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
