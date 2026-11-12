@@ -628,6 +628,28 @@ def test_a_first_candle_the_venue_is_unsure_of_is_checked_again():
     V.sync(v, "U")
     assert V.load_side("fake", "U")["head"] == V.HEAD_VERSION and V.load("fake", "U")["ts"].tolist() == full["ts"].tolist()
 
+
+def test_bitstamp_finds_the_first_candle_of_a_pair_listed_years_after_it_opened():
+    """One 3-day request spans 8.2 years from 2011: a pair listed later (SOL 2022) is found on the next page."""
+    b, asked = V.Bitstamp(), []
+    listed = 1_660_694_400                                           # 2022-08-17
+    span = 1000 * V.Bitstamp.BUCKET_S
+
+    def fake_get(url, **kw):
+        start = int(url.rsplit("start=", 1)[1])
+        asked.append(start)
+        ts = [t for t in range(listed, start + span, V.Bitstamp.BUCKET_S) if t >= start]
+        return {"data": {"ohlc": [{"timestamp": t, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 2} for t in ts]}}
+    real, V._get = V._get, fake_get
+    try:
+        set_now(1_794_000_000_000)
+        assert b.first_ms("solusd") == listed * 1000 and asked == [V.Bitstamp.OPENED_S, V.Bitstamp.OPENED_S + span]
+        asked.clear()
+        listed = 1_900_000_000                                       # never traded before now: nothing, and the walk ends
+        assert b.first_ms("nousd") is None and len(asked) == 2
+    finally:
+        V._get = real
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
