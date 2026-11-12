@@ -80,6 +80,8 @@ class FakeReverse(Fake):
 
 
 def test_merge_sums_dollars_and_takes_the_dollar_weighted_median_price():
+    """Each venue's say in a minute's price = its dollars over the day before (b has 500 minutes more history, so
+    it leads until a's day outweighs it, about 80 minutes in)."""
     a = series(T0, 1000, dollars=1e6, px=100, seed=1)
     b = series(T0 - 500 * M, 1200, dollars=2e5, px=101, seed=2)      # starts earlier, ends earlier
     b = b[b["ts"] % (3 * M) != 0]                                    # and misses every third minute
@@ -93,7 +95,8 @@ def test_merge_sums_dollars_and_takes_the_dollar_weighted_median_price():
     only_b = out[~out["ts"].isin(a["ts"])]
     assert np.allclose(only_b["turnover"], 2e5)
     pa = a.set_index("ts")["close"]
-    assert np.allclose(both["close"].to_numpy(), pa.loc[both["ts"]].to_numpy())      # a carried most of the dollars
+    later = both[both["ts"] >= T0 + 200 * M]
+    assert np.allclose(later["close"].to_numpy(), pa.loc[later["ts"]].to_numpy())    # a carries most of the dollars
     pb = b.set_index("ts")["close"]
     assert np.allclose(only_b["close"].to_numpy(), pb.loc[only_b["ts"]].to_numpy())
     swapped = C.merge([b, a])                                        # order only matters for minutes nobody traded
@@ -109,10 +112,26 @@ def test_one_venues_bad_print_does_not_move_the_price():
     out = C.merge(base + [bad])
     assert (out["close"] > 95).all() and (out["low"] > 95).all()
     heavy = series(T0, 50, dollars=9e6, px=50, seed=5)               # but a venue with most of the money sets the price
-    assert (C.merge(base + [heavy])["close"] < 55).all()
+    assert (C.merge(base + [heavy])["close"].iloc[1:] < 55).all()   # (from its second minute: the first has no day behind it)
     w = C.weighted_median(np.array([[1.0, 2.0, 3.0], [np.nan, 5.0, 7.0], [4.0, np.nan, np.nan]]),
                           np.array([[1.0, 1.0, 5.0], [0.0, 1.0, 1.0], [0.0, 0.0, 0.0]]))
     assert w.tolist() == [3.0, 5.0, 4.0]                             # heavy wins; lower median on a tie; unweighted falls back
+
+
+def test_a_dead_markets_big_off_price_trade_has_no_say():
+    """Bitfinex ZEC, 2025-09-29 08:44: 3,500 ZEC sold at $46 (about $164k, more than every other exchange that
+    minute) while Binance and Bybit traded at $67. Its say is its dollars over the day before: next to nothing."""
+    live = series(T0, 3000, dollars=1e5, px=67, seed=21)
+    dead = series(T0, 3000, dollars=0.0, px=67, seed=22)             # candles without trades: no say at all
+    dead.loc[dead.index[::400], "turnover"] = 50.0                   # a few tiny trades a day
+    t = T0 + 2000 * M
+    dead.loc[dead["ts"] == t, ["open", "high", "low", "close", "turnover"]] = [46.0, 46.8, 45.8, 46.8, 1.64e5]
+    dead.loc[dead["ts"] == t + 7 * M, ["open", "high", "low", "close", "turnover"]] = [20.0, 20.0, 20.0, 20.0, 0.0]
+    out = C.merge([dead, live]).set_index("ts")                      # (dead first: priority does not save it either)
+    assert np.allclose(out["low"].to_numpy(), live["low"].to_numpy()) and np.allclose(out["high"].to_numpy(), live["high"].to_numpy())
+    assert out.loc[t, "turnover"] == 1.64e5 + 1e5                    # its dollars still count
+    w = C.trailing_dollars(np.array([0, M, 2 * M, V.DAY + M]), np.array([5.0, 7.0, 11.0, 13.0]))
+    assert w.tolist() == [0.0, 5.0, 12.0, 18.0]                      # the day before, not the minute itself
 
 
 def test_merge_since_matches_the_full_merge_tail():

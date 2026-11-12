@@ -103,6 +103,7 @@ class Market:
         self.venues = None                                       # all:<T> only: the series it is made of (see plan_all)
         self.live_rows = {}                                      # all:<T> only: label -> {minute: newest row seen live}
         self.built_at = 0.0                                      # all:<T> only: when the merged series was last rebuilt
+        self.weights = {}                                        # all:<T> only: label -> its dollars over the last day (its say in live prices)
         self.built_done = 0                                      # all:<T> only: how many series were done at that merge
         self.resync_at = 0.0                                     # all:<T> only: an exchange failed, try again after this
         self.retry_failed = False                                # all:<T> only: the next sync retries just the failed exchanges
@@ -657,11 +658,13 @@ def merged_frame(m: Market) -> pd.DataFrame:
             s["n"] = 0
     if not frames:
         return C.merge([])
+    m.weights = {lab: float(f["turnover"].to_numpy(float)[f["ts"].to_numpy(np.int64) > int(f["ts"].iloc[-1]) - C.DAY].clip(min=0).sum())
+                 for lab, f in zip(labels, frames)}
     cp, cj = cache_paths(ticker)
     base, cut = None, None
     try:
         side = json.loads(cj.read_text(encoding="utf-8")) if cj.exists() else None
-        if side and sorted(side["parts"]) == sorted(labels):
+        if side and side.get("method") == C.METHOD and sorted(side["parts"]) == sorted(labels):
             cut = int(side["last"])
             if all(side["parts"][lab] == [int(f["ts"].iloc[0]), int(np.searchsorted(f["ts"].to_numpy(np.int64), cut))]
                    for lab, f in zip(labels, frames)):
@@ -684,7 +687,7 @@ def merged_frame(m: Market) -> pd.DataFrame:
             head = merged[merged["ts"] < cut]
             X.write_durably(cp, lambda fh: head.to_parquet(fh, index=False))
             fp = {lab: [int(f["ts"].iloc[0]), int(np.searchsorted(f["ts"].to_numpy(np.int64), cut))] for lab, f in zip(labels, frames)}
-            X.write_durably(cj, lambda fh: fh.write(json.dumps({"last": cut, "parts": fp}).encode()))
+            X.write_durably(cj, lambda fh: fh.write(json.dumps({"method": C.METHOD, "last": cut, "parts": fp}).encode()))
         except Exception as e:
             log(f"{m.key}: merge cache not written: {type(e).__name__}: {e}")
     return merged
@@ -901,7 +904,7 @@ def live_rows_all(m: Market) -> tuple:
         for t in [t for t in known if t < newest - 10 * B.MINUTE]:
             del known[t]
         lists.append([known[t] for t in sorted(known) if t >= newest - 2 * B.MINUTE])
-    return C.merge_rows(lists), err
+    return C.merge_rows(lists, [m.weights.get(s["label"], 0.0) for s in done]), err
 
 
 def scan_batch() -> None:

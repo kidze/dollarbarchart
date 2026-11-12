@@ -23,6 +23,8 @@ RELIST_GAP = 14 * DAY                                            # a hole this l
 RELIST_MOVE = 2.0                                                # ... it is, when the price across it moved more than this (no reference to ask)
 MISMATCH = 0.30                                                  # a day whose close is this far from the reference's is another coin
 MISMATCH_DAYS, MISMATCH_SPAN = 3, 30 * DAY                       # ... once this many such days fall within this span
+WEIGHT_SPAN = DAY                                                # an exchange's say in a minute's price: its dollars over the day before
+METHOD = 2                                                       # the merge rule's version (a cached merge made by another is redone)
 JUMP = 4.0                                                       # a day whose price is this many times the day before's: another coin took the symbol
 
 
@@ -48,19 +50,33 @@ def weighted_median(vals: np.ndarray, w: np.ndarray) -> np.ndarray:
     return out
 
 
-def merge(frames: list, since=None) -> pd.DataFrame:
+def trailing_dollars(ts: np.ndarray, dollars: np.ndarray) -> np.ndarray:
+    """Each minute's dollars of the WEIGHT_SPAN before it, not counting the minute itself."""
+    cum = np.concatenate([[0.0], np.cumsum(dollars)])
+    return cum[np.arange(len(ts))] - cum[np.searchsorted(ts, ts - WEIGHT_SPAN, side="left")]
+
+
+def merge(frames: list, since=None, weights=None) -> pd.DataFrame:
     """frames in priority order, each with the app's columns, sorted by ts; returns one frame sorted by ts.
-    since = only minutes at or after this time (the tail after a cached merge)."""
+    since = only minutes at or after this time (the tail after a cached merge).
+    Dollars and volume are summed. Each of open/high/low/close is the median of the exchanges that traded in the
+    minute, each weighted by its dollars over the day before (weights = one fixed number per frame instead, for a
+    few live rows): the way price indexes weight their exchanges. A big trade far off the price on a nearly dead
+    market (Bitfinex ZEC sold 3,500 ZEC at $46 with the market at $67 on 2025-09-29) has almost no say, where
+    weighting by the minute's own dollars let it outvote Binance. A candle without trades has no say at all."""
     parts = []
-    for f in frames:
+    for j, f in enumerate(frames):
         if not len(f):
             continue
         ts = f["ts"].to_numpy(np.int64)
+        dol = f["turnover"].to_numpy(float)
+        say = trailing_dollars(ts, np.maximum(dol, 0.0)) if weights is None else np.full(len(ts), float(weights[j]))
+        say = np.where(dol > 0, say, 0.0)
         lo = int(np.searchsorted(ts, since)) if since is not None else 0
         if lo >= len(ts):
             continue
         parts.append((ts[lo:], np.stack([f[c].to_numpy(float)[lo:] for c in PX], axis=1),
-                      f["volume"].to_numpy(float)[lo:], f["turnover"].to_numpy(float)[lo:]))
+                      f["volume"].to_numpy(float)[lo:], dol[lo:], say[lo:]))
     if not parts:
         return _empty()
     u = np.unique(np.concatenate([p[0] for p in parts]))
@@ -73,13 +89,17 @@ def merge(frames: list, since=None) -> pd.DataFrame:
         b = min(n, a + CHUNK)
         P = np.full((b - a, k, 4), np.nan)
         W = np.zeros((b - a, k))
+        W0 = np.zeros((b - a, k))                                # the minute's own dollars: the say when no one has a day behind it
         for j, (p, ps) in enumerate(zip(parts, pos)):
             i0, i1 = np.searchsorted(ps, [a, b])
             rel = ps[i0:i1] - a
             P[rel, j, :] = p[1][i0:i1]
-            W[rel, j] = np.maximum(p[3][i0:i1], 0.0)
+            W[rel, j] = p[4][i0:i1]
+            W0[rel, j] = np.maximum(p[3][i0:i1], 0.0)
             vol[a + rel] += p[2][i0:i1]
             dol[a + rel] += p[3][i0:i1]
+        fresh = ~(W.sum(axis=1) > 0)
+        W[fresh] = W0[fresh]
         for c in range(4):
             px[a:b, c] = weighted_median(P[:, :, c], W)
     px[:, 1] = np.maximum(px[:, 1], px[:, [0, 3]].max(axis=1))  # medians keep the order of each venue's own o/h/l/c,
@@ -87,11 +107,18 @@ def merge(frames: list, since=None) -> pd.DataFrame:
     return pd.DataFrame({"ts": u, "open": px[:, 0], "high": px[:, 1], "low": px[:, 2], "close": px[:, 3], "volume": vol, "turnover": dol})
 
 
-def merge_rows(row_lists: list) -> list:
-    """Same rule for a few live rows per venue (priority order): one row per minute."""
-    frames = [pd.DataFrame(sorted(rows), columns=COLS) for rows in row_lists if rows]
-    out = merge(frames)
+def merge_rows(row_lists: list, weights=None) -> list:
+    """Same rule for a few live rows per venue (priority order): one row per minute. weights = each venue's
+    dollars over the last day (the say it has in the price; None = weigh by the rows' own dollars)."""
+    keep = [i for i, rows in enumerate(row_lists) if rows]
+    frames = [pd.DataFrame(sorted(row_lists[i]), columns=COLS) for i in keep]
+    out = merge(frames, weights=[weights[i] for i in keep]) if weights is not None else _merge_by_rows(frames)
     return [[int(r[0])] + [float(x) for x in r[1:]] for r in out.itertuples(index=False)]
+
+
+def _merge_by_rows(frames: list) -> pd.DataFrame:
+    """A few rows without known weights: each venue weighs its own dollars of these rows."""
+    return merge(frames, weights=[max(float(f["turnover"].clip(lower=0).sum()), 0.0) for f in frames])
 
 
 def daily_close(f: pd.DataFrame) -> pd.Series:
