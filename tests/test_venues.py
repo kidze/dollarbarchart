@@ -726,6 +726,49 @@ def test_a_file_the_archive_did_not_write_is_streamed_from_the_start():
     assert v.streams == [-1] and res["result"] == "done" and V.load_side("fake", "P")["stream_done"]
     assert V.load("fake", "P")["ts"].tolist() == full["ts"].tolist()     # the gap between the archive and the file too
 
+
+def test_a_minute_only_a_thinner_exchange_traded_is_held_near_the_bigger_ones():
+    """Kraken's thin 2014 BTC/USD book: a lone print 27% below while Bitstamp traded around it. Far less than the 2x
+    of a bad print, but a wick the market never had: held to LONE_BAND beyond the bigger exchange's range."""
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=31)
+    thin = series(T0, n, dollars=1e3, seed=31)
+    gone = [1000, 2000, 2500, 3000, 3500, n - 2]                     # minutes the big exchange did not trade
+    big = big.drop(index=gone).reset_index(drop=True)
+    for k in (1000, 2000):                                           # a whole candle 27% low
+        thin.loc[k, ["open", "high", "low", "close"]] = thin.loc[k, "close"] * 0.73
+    thin.loc[2500, "low"] = thin.loc[2500, "close"] * 0.9           # a 10% wick
+    thin.loc[3000, "high"] = thin.loc[3000, "close"] * 1.02         # 2%: within the band, kept
+    thin.loc[n - 2, "low"] = thin.loc[n - 2, "close"] * 0.8         # the newest minutes: nothing after them yet
+    merged = C.merge([big, thin])
+    out, fixed = C.despike(merged, [big, thin])
+    row = lambda df, k: df[df["ts"] == T0 + k * M].iloc[0]
+    assert fixed == 2
+    assert all(row(out, 2000)[c] == row(merged, 1999)["close"] for c in C.PX)          # a flat candle at the last price
+    assert row(out, 2500)["low"] == min(row(merged, 2500)["open"], row(merged, 2500)["close"])
+    assert row(out, 3000)["high"] == row(merged, 3000)["high"] and row(out, n - 2)["low"] == row(merged, n - 2)["low"]
+    assert row(out, 1000)["low"] == row(merged, 1000)["low"]        # its first day: no say to compare yet
+    keep = ~merged["ts"].isin([T0 + 2000 * M, T0 + 2500 * M])
+    assert out[keep].equals(merged[keep])
+
+
+def test_a_lone_minute_of_a_bigger_or_similar_exchange_or_with_nobody_around_is_left_alone():
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=32)
+    mid = series(T0, n, dollars=5e5, seed=32)                        # half the big one's dollars: not LONE_RATIO smaller
+    thin = series(T0, n, dollars=1e3, seed=32)
+    big.loc[2000, "low"] = big.loc[2000, "close"] * 0.85             # the exchange with the say moves alone: the market
+    mid.loc[2500, "low"] = mid.loc[2500, "close"] * 0.9              # a similar-sized exchange alone: two real markets
+    quiet = list(range(2990, 3011))                                  # nobody else trades within 5 minutes of minute 3000
+    drop = lambda f, ks: f[~f["ts"].isin([T0 + k * M for k in ks])].reset_index(drop=True)
+    big = drop(big, [2500] + quiet)
+    mid = drop(mid, [2000] + quiet)
+    thin = drop(thin, [2000, 2500] + [k for k in quiet if k != 3000])
+    thin.loc[thin["ts"] == T0 + 3000 * M, "low"] *= 0.85
+    merged = C.merge([big, mid, thin])
+    out, fixed = C.despike(merged, [big, mid, thin])
+    assert fixed == 0 and out.equals(merged)
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

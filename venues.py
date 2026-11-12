@@ -1122,7 +1122,7 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
                     take(chunk)
                     streamed = chunk[-1][0]
                     if progress:
-                        progress(min(100.0, (streamed - first) / span * 100), streamed)
+                        progress(max(0.0, min(100.0, (streamed - first) / span * 100)), streamed)
                     if stop and stop():
                         return finish("stopped")
                 if stop and stop():
@@ -1139,7 +1139,7 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
                     if rows:
                         take(rows)
                     if progress:
-                        progress(min(100.0, (last - first) / span * 100), last)
+                        progress(max(0.0, min(100.0, (last - first) / span * 100)), last)
                     if last >= now_ms - MINUTE:
                         break
                     cursor = last + MINUTE

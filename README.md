@@ -15,7 +15,9 @@ amount of market activity. TradingView does not draw them, so this does.
   cannot move the chart. A price 2x away from the minutes around it that no second exchange shows within a
   minute is a bad print even when nobody can outvote it (Bitfinex sold BTC at $0.01 in April 2013, when it was
   the only exchange trading): it takes the other exchanges' price, or the candle's body when there are none.
-  A crash every exchange shows stays. History goes back as far as the oldest exchange (BTC: Bitstamp 2011). A market an
+  A minute only one exchange traded, while an exchange with 3x its dollars over the day before traded within 5
+  minutes of it, may print at most 3% beyond that exchange's range there (Kraken's thin 2014 BTC/USD book sold at
+  $295 while the market was at $400). A crash every exchange shows stays. History goes back as far as the oldest exchange (BTC: Bitstamp 2011). A market an
   exchange lists under the same ticker but for another coin is left out (latest price more than 10% off
   Bybit's), and so is history from before an exchange handed the symbol to this coin (a gap of 14+ days
   across which the price does not carry on, a 4x price jump in a day that Bybit did not make, or three days

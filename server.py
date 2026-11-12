@@ -341,7 +341,8 @@ def source_text(m: Market) -> str:
         return ("Combined: " + (" + ".join(parts) if parts else "every exchange that lists it") +
                 ". 1-minute candles; dollars are summed across exchanges, each price is the dollar-weighted median of the exchanges "
                 "that traded that minute" + (f" ({', '.join(approx)} report coin volume only: dollars = volume × close)" if approx else "") +
-                f"; a price {C.SPIKE:g}× away from the minutes around it that no second exchange shows is a bad print and is repaired"
+                f"; a price {C.SPIKE:g}× away from the minutes around it that no second exchange shows is a bad print and is repaired,"
+                f" and a minute only a much smaller exchange traded is held within {C.LONE_BAND:.0%} of the bigger ones around it"
                 "; hours an exchange serves no minutes for are filled from its 5-minute or hourly candles where it has them")
     info = market_info(m.key)
     what = "perpetual" if info["kind"] == "perp" else "spot"
