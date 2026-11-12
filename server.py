@@ -103,6 +103,7 @@ class Market:
         self.venues = None                                       # all:<T> only: the series it is made of (see plan_all)
         self.live_rows = {}                                      # all:<T> only: label -> {minute: newest row seen live}
         self.built_at = 0.0                                      # all:<T> only: when the merged series was last rebuilt
+        self.built_done = 0                                      # all:<T> only: how many series were done at that merge
         self.resync_at = 0.0                                     # all:<T> only: an exchange failed, try again after this
         self.retry_failed = False                                # all:<T> only: the next sync retries just the failed exchanges
         self.replan = False                                      # all:<T> only: an exchange's market list was missing at plan time: plan again
@@ -698,6 +699,7 @@ def rebuild_all(m: Market) -> None:
         m.cd, m.sets, m.meta, m.built_n = cd, sets, meta, cd.n
         m.first_ms = int(cd.ts[0]) if cd.n else None
         m.built_at = m.updated = time.time()
+        m.built_done = sum(1 for s in m.venues or [] if s["status"] == "done")
     log(f"{m.key}: merged {cd.n:,} minutes from {sum(1 for s in m.venues if s.get('n'))} series in {time.time() - t0:.1f}s")
 
 
@@ -740,14 +742,14 @@ def sync_part(m: Market, s: dict, stop) -> None:
 def refresh_tail(m: Market, s: dict, stop) -> None:
     """A done series' newest minutes onto its file while the market's other series are still downloading (its
     status stays "done"; a failure is left for the next round)."""
-    if s["venue"] == "bybit":                                    # the plain Bybit market of the same key shares the file
-        plain = STATE["markets"].get(s["symbol"])
-        if plain is not None and plain.cd is not None:
-            if on_screen(plain):
-                persist(plain)
-                return
-            unload(plain)
     try:
+        if s["venue"] == "bybit":                                # the plain Bybit market of the same key shares the file
+            plain = STATE["markets"].get(s["symbol"])
+            if plain is not None and plain.cd is not None:
+                if on_screen(plain):
+                    persist(plain)
+                    return
+                unload(plain)
         V.sync(V.VENUES[s["venue"]], s["symbol"], stop=stop)
     except Exception as e:
         log(f"{m.key}: {s['label']} catching up failed: {type(e).__name__}: {e}")
@@ -796,6 +798,7 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
             continue
         s["status"] = "queued"
         groups.setdefault(s["venue"], []).append(s)
+    m.built_done = 0                                             # every series counts as newly done again
     for g in groups.values():                                    # the perp first: it usually trades the most
         g.sort(key=lambda s: s["kind"] != "perp")
     if only_failed and not groups:
@@ -825,13 +828,15 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
             done = [s for s in live if s["status"] == "done" and s.get("n")]
             if not build or not (done or any(s.get("grew") for s in live)):
                 continue
-            if m.sets is None and done:
-                rebuild_all(m)                                   # an empty chart shows as soon as the first exchange is in
+            behind = m.cd is None or not m.cd.n or int(m.cd.ts[m.cd.n - 1]) < (time.time() - LIVE_GAP_S * 3) * 1000
+            if done and (m.sets is None or (behind and len(done) > m.built_done)):
+                rebuild_all(m)                                   # an empty or out-of-date chart: as soon as an exchange is in
             elif time.time() - m.built_at > REBUILD_S and not stop():
                 for s in done:                                   # their files end where they finished: catch them up first
                     if not stop():
                         refresh_tail(m, s, stop)
-                rebuild_all(m)                                   # the series still downloading join with what they have
+                if not stop():
+                    rebuild_all(m)                               # the series still downloading join with what they have
         for f in futs:
             f.result()
     failed = [s for s in m.venues if s["status"].startswith("failed")]
@@ -1011,8 +1016,8 @@ def live_loop() -> None:
                 try:
                     rows, err = live_rows_all(m)
                     if rows:
-                        with LOCK:
-                            if m.sets is not None and m.cd is not None:
+                        with LOCK:                               # only onto a chart that reaches them (else the next merge does)
+                            if m.sets is not None and m.cd is not None and m.cd.n and rows[0][0] <= int(m.cd.ts[m.cd.n - 1]) + 3 * B.MINUTE:
                                 m.cd.upsert(rows)
                                 B.update_all(m.sets, m.cd)
                                 m.meta["last"] = int(m.cd.ts[m.cd.n - 1] // 1000)
@@ -1106,7 +1111,7 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def meta(self, m, q) -> dict:
         out = meta_of(m)
-        if not out["update"] and page_stale(q.get("pb", [None])[0]):
+        if not out["update"] and build_id() == STATE["build"] and page_stale(q.get("pb", [None])[0]):
             out["update"] = {"kind": "reload", "files": ["the page"], "stale": True}
         return out
 

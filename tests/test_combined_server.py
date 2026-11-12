@@ -96,6 +96,15 @@ def test_a_window_served_an_older_page_is_told_to_reload():
     old = S.QUIET_S
     try:
         S.QUIET_S = 0
+        S.STATE["build"] = S.build_id()                          # nothing else pending
+        h = types.SimpleNamespace(meta=S.H.meta)
+        m = S.Market("linear:TESTSTALE")
+        assert S.H.meta(h, m, {"pb": ["1-2"]})["update"] == {"kind": "reload", "files": ["the page"], "stale": True}
+        assert S.H.meta(h, m, {"pb": [tag]})["update"] is None
+        pending = dict(S.STATE["build"], **{"server.py": [0, 0]})   # a server change still pending: the restart offer wins
+        S.STATE["build"], kept = pending, S.STATE["build"]
+        assert S.H.meta(h, m, {"pb": ["1-2"]})["update"] is None
+        S.STATE["build"] = kept
         assert not S.page_stale(tag)
         assert S.page_stale("1-2") and S.page_stale(None)        # an older page, and a page from before pages said
         S.QUIET_S = 10 ** 9
