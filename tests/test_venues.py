@@ -559,6 +559,75 @@ def test_padding_candles_without_volume_are_not_stored_and_the_sync_still_advanc
     got = V.load("fake", "P")
     assert (got["volume"] > 0).all() and len(got) == int((~pad).sum()) and v.requests == 5
 
+
+def test_a_step_to_a_new_price_level_is_not_a_bad_print():
+    """Sparse history on one exchange: a day-apart series steps from 100 to 380 and stays (the review's case).
+    Each row is near the rows on one side of it, so nothing is repaired; a lone print far from both sides is."""
+    ts = T0 + np.arange(61) * V.DAY
+    px = np.where(np.arange(61) < 30, 100.0, 380.0)
+    f = pd.DataFrame({"ts": ts, "open": px, "high": px, "low": px, "close": px, "volume": 1.0, "turnover": px})
+    out, fixed = C.despike(C.merge([f]), [f])
+    assert fixed == 0
+    g = f.copy()
+    g.loc[45, ["low", "close"]] = [20.0, 20.0]
+    out, fixed = C.despike(C.merge([g]), [g])
+    assert fixed == 1 and out.loc[45, "low"] == 380.0 and out.loc[45, "close"] == 380.0
+
+
+def test_a_stretch_longer_than_one_fine_request_fills_whole_hours():
+    """The 5-minute window ends on an hour boundary: no missing hour gets only part of its candles (the review's case)."""
+    scratch()
+    H = V.HOUR
+    start = (T0 // H + 1) * H
+    full = series(start, 3 * 1440, seed=17)
+    hour = (full["ts"] - start) // H
+    minutes = full[~hour.between(10, 30)].reset_index(drop=True)
+    hourly = pd.DataFrame({"ts": start + np.arange(72) * H, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                           "volume": 60.0, "turnover": 6000.0})
+    f5 = start + np.arange(10 * 12, 31 * 12) * 5 * M
+    five = pd.DataFrame({"ts": f5, "open": 100.0, "high": 100.5, "low": 99.5, "close": 100.0, "volume": 5.0, "turnover": 500.0})
+    v = FakeCoarse(minutes, int(minutes["ts"].iloc[-1]), five, hourly)  # window 100: a fine request spans 8h20m
+    res = V.sync(v, "W")
+    got = V.load("fake", "W")
+    per_hour = ((got["ts"] - start) // H).value_counts()
+    assert res["filled"] == 21 and all(per_hour[k] == 12 for k in range(10, 31))
+    assert all(b % H == H - 1 or b == ((int(minutes["ts"].iloc[-1]) - V.DAY) // H * H) - 1 for m_, a, b in v.coarse_calls if m_ == 5)
+
+
+def test_a_coarse_failure_leaves_the_series_done_and_the_stretch_for_next_time():
+    scratch()
+    H = V.HOUR
+    start = (T0 // H + 1) * H
+    full = series(start, 3 * 1440, seed=18)
+    minutes = full[~((full["ts"] - start) // H).between(5, 6)].reset_index(drop=True)
+    hourly = pd.DataFrame({"ts": start + np.arange(72) * H, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
+                           "volume": 60.0, "turnover": 6000.0})
+    v = FakeCoarse(minutes, int(minutes["ts"].iloc[-1]), hourly.iloc[:0], hourly)
+    real = v.coarse
+
+    def broken(*a, **k):
+        raise LookupError("HTTP 500 [\"error\",11010,\"ratelimit: error\"]")
+    v.coarse = broken
+    res = V.sync(v, "E")
+    assert res["result"] == "done" and res["filled"] == 0 and "holes_to" not in V.load_side("fake", "E")
+    v.coarse = real
+    res = V.sync(v, "E")
+    assert res["filled"] == 2 and "holes_to" in V.load_side("fake", "E")
+
+
+def test_a_first_candle_the_venue_is_unsure_of_is_checked_again():
+    scratch()
+    full = series(T0, 600, seed=19)
+    v = Fake(full, int(full["ts"].iloc[-1]))
+    v.head_check = True
+    v.first_is_sure = lambda symbol: False                           # Binance's REST failed: the archive's first may be late
+    V.sync(v, "U")
+    assert "head" not in V.load_side("fake", "U")
+    V.save("fake", "U", full.iloc[200:].reset_index(drop=True))     # (as if the archive started later than REST)
+    v.first_is_sure = lambda symbol: True
+    V.sync(v, "U")
+    assert V.load_side("fake", "U")["head"] == V.HEAD_VERSION and V.load("fake", "U")["ts"].tolist() == full["ts"].tolist()
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

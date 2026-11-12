@@ -8,7 +8,7 @@ first frame that has them (frames come in priority order). Done in numpy, in chu
 merge (ten series of several million rows) takes seconds and bounded memory.
 
 despike() repairs the merged prices no second exchange confirms: a minute whose price is SPIKE times away from
-the surrounding minutes' median close, shown by only one exchange (the only one trading then, like Bitfinex's
+the median close of the minutes before it and of those after it, shown by only one exchange (the only one trading then, like Bitfinex's
 BTC trades at $0.01 in April 2013, or one holding most of the say). Market-wide moves, which every exchange
 shows, are kept.
 
@@ -130,20 +130,26 @@ def _merge_by_rows(frames: list) -> pd.DataFrame:
     return merge(frames, weights=[max(float(f["turnover"].clip(lower=0).sum()), 0.0) for f in frames])
 
 
-def spike_ref(close: np.ndarray) -> np.ndarray:
-    """The median close of the SPIKE_ROWS minutes either side of each minute (fewer at the ends)."""
-    return pd.Series(close).rolling(2 * SPIKE_ROWS + 1, center=True, min_periods=1).median().to_numpy()
+def spike_refs(close: np.ndarray) -> tuple:
+    """(median close of the SPIKE_ROWS minutes before each minute, of the SPIKE_ROWS after it); NaN where there are none."""
+    s = pd.Series(close)
+    back = s.rolling(SPIKE_ROWS, min_periods=1).median().shift(1).to_numpy()
+    fwd = s[::-1].reset_index(drop=True).rolling(SPIKE_ROWS, min_periods=1).median().shift(1).to_numpy()[::-1]
+    return back, fwd
 
 
 def despike(merged: pd.DataFrame, frames: list, start: int = 0, ref=None, weights=None) -> tuple:
     """Repair the off-price prints in merged rows start.. that no second exchange confirms. Returns (frame, number
-    of minutes repaired). frames = the merge's input (priority order); ref = the reference price per row from
-    start on (default: spike_ref of the merged closes, with the rows before start as context); weights = one say
-    per frame (default: each exchange's dollars over the day before the minute).
-    A price outside [ref / SPIKE, ref x SPIKE] stands when CONFIRM exchanges that traded within a minute of it
-    went that far the same way (a crash every exchange shows). Otherwise it takes the dollar-weighted median of
-    the exchanges whose price there is inside the band, and when none is (the only exchange trading then): the
-    open becomes the previous close, the close the open, and the high and low the candle's body."""
+    of minutes repaired). frames = the merge's input (priority order); ref = one reference price per row from
+    start on (default: the median close of the SPIKE_ROWS merged minutes before each and of the SPIKE_ROWS after
+    it, spike_refs, with the rows before start as context); weights = one say per frame (default: each exchange's
+    dollars over the day before the minute).
+    A price is a bad print when it is SPIKE times below (above) the minutes before it AND the minutes after it: a
+    step to a new price level (sparse early history, a listing) is near one side and stays. It stands anyway when
+    CONFIRM exchanges that traded within a minute of it went that far the same way (a crash every exchange shows).
+    Otherwise it takes the dollar-weighted median of the exchanges whose price there is not a bad print, and when
+    there is none (the only exchange trading then): the open becomes the previous close, the close the open, and
+    the high and low the candle's body."""
     n = len(merged)
     if start >= n or not len(frames):
         return merged, 0
@@ -151,11 +157,17 @@ def despike(merged: pd.DataFrame, frames: list, start: int = 0, ref=None, weight
     px = merged[list(PX)].to_numpy(float)
     if ref is None:
         lo = max(0, start - SPIKE_ROWS)
-        ref = spike_ref(px[lo:, 3])[start - lo:]
-    ref = np.asarray(ref, float)
-    seg = px[start:]
-    out_of_band = (seg < (ref / SPIKE)[:, None]) | (seg > (ref * SPIKE)[:, None])
-    rows = np.flatnonzero(out_of_band.any(axis=1))
+        back, fwd = spike_refs(px[lo:, 3])
+        back, fwd = back[start - lo:], fwd[start - lo:]
+    else:
+        back = fwd = np.asarray(ref, float)
+    with np.errstate(invalid="ignore"):
+        low_b = np.fmin(back, fwd) / SPIKE                      # NaN only where neither side has minutes
+        high_b = np.fmax(back, fwd) * SPIKE
+        center = np.where(np.isnan(back), fwd, back)
+        seg = px[start:]
+        bad = (seg < low_b[:, None]) | (seg > high_b[:, None])
+    rows = np.flatnonzero(bad.any(axis=1))
     if not len(rows):
         return merged, 0
     src = [(f["ts"].to_numpy(np.int64), f[list(PX)].to_numpy(float), f["turnover"].to_numpy(float)) for f in frames]
@@ -173,11 +185,11 @@ def despike(merged: pd.DataFrame, frames: list, start: int = 0, ref=None, weight
     fixed = 0
     for r in rows:                                               # oldest first: a repaired close is the next open's fallback
         i, t = start + int(r), int(ts[start + int(r)])
-        lo_b, hi_b = ref[r] / SPIKE, ref[r] * SPIKE
+        lo_b, hi_b = low_b[r], high_b[r]
         new, lone = px[i].copy(), []
         for c in range(4):
             x = px[i, c]
-            if lo_b <= x <= hi_b:
+            if not (x < lo_b or x > hi_b):
                 continue
             down, confirm, vals, ws, own = x < lo_b, 0, [], [], []
             for j, (sts, spx, sd) in enumerate(src):
@@ -205,9 +217,9 @@ def despike(merged: pd.DataFrame, frames: list, start: int = 0, ref=None, weight
                 lone.append(c)
         if 0 in lone:
             prev = px[i - 1, 3] if i > 0 else np.nan
-            new[0] = prev if lo_b <= prev <= hi_b else ref[r]
+            new[0] = prev if lo_b <= prev <= hi_b else center[r]
         if 3 in lone:
-            new[3] = new[0] if lo_b <= new[0] <= hi_b else ref[r]
+            new[3] = new[0] if lo_b <= new[0] <= hi_b else center[r]
         if 1 in lone:
             new[1] = max(new[0], new[3])
         if 2 in lone:

@@ -103,6 +103,9 @@ class Venue:
     def coarse(self, symbol: str, minutes: int, start_ms: int, end_ms: int, stop=None) -> list:   # coarser candles, ascending
         raise NotImplementedError
 
+    def first_is_sure(self, symbol: str) -> bool:                # False: first_ms fell back to a source that may start late
+        return True
+
     def instruments(self) -> list:                               # [{"symbol", "base", "quote", "kind", "list_ms"}]
         raise NotImplementedError
 
@@ -142,6 +145,10 @@ class Binance(Venue):
         self._months = {}                                        # (kind, symbol) -> ("YYYY-MM", rows array or None = not in the archive)
         self._lock = threading.Lock()
         self._streams = {}
+        self._unsure = set()                                     # symbols whose last first_ms could not ask the REST API
+
+    def first_is_sure(self, symbol: str) -> bool:
+        return symbol not in self._unsure
 
     @staticmethod
     def split(symbol: str) -> tuple:
@@ -244,17 +251,18 @@ class Binance(Venue):
 
     def first_ms(self, symbol: str):
         """The REST API's first candle (one request: the archive lacks the first months of the oldest perps),
-        else the archive's."""
+        else (REST failing: a ban, the network) the archive's, which first_is_sure() then says may be late."""
         kind, sym = self.split(symbol)
         url, _ = self.REST[kind]
         try:
             d = _get(f"{url}?symbol={sym}&interval=1m&startTime=0&limit=1", attempts=3)
+            self._unsure.discard(symbol)
             if d:
                 return int(d[0][0])
         except LookupError:
             raise
         except Exception:
-            pass
+            self._unsure.add(symbol)
         for period in ("monthly", "daily"):
             keys = self._keys(kind, sym, period)
             if keys:
@@ -622,8 +630,9 @@ class Bitstamp(Venue):
         return rows
 
     def first_ms(self, symbol: str):
-        # 3-day candles from before Bitstamp opened (2011-08) start at the pair's first; 1-minute ones answer
-        # nothing for a start before the first trade
+        # 3-day candles asked from before Bitstamp opened (2011-08) start at the pair's first one. A 1-minute window
+        # that starts before the pair's first minute answers from that minute on (nothing when it ends before it),
+        # so walking 1-minute windows from this bucket's start misses nothing (checked 2026-11-12: BTC 2011-08-18 12:37)
         rows = self._rows(_get(f"{self.API}/ohlc/{symbol}/?step=259200&limit=1000&start=1300000000"))
         traded = [r for r in rows if r[5] > 0]
         return traded[0][0] if traded else None
@@ -816,7 +825,8 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
     def fill_holes():
         """Hours the venue traded in (its hourly candles) but serves no minutes for: its finest coarser candles
         there, else the hour's candle. Each stretch of history is checked once (side["holes_to"]); the last day is
-        left for later, its minutes may still be arriving."""
+        left for later, its minutes may still be arriving. A failure leaves the stretch for the next sync: the
+        series itself is complete without it."""
         flush()
         if not len(frame):
             return
@@ -825,26 +835,29 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
         hi = (int(ts[-1]) - DAY) // HOUR * HOUR
         if hi <= lo:
             return
-        hours = venue.coarse(symbol, 60, lo, hi - 1, stop=stop)
-        if stop and stop():
+        try:
+            hours = venue.coarse(symbol, 60, lo, hi - 1, stop=stop)
+            if stop and stop():
+                return
+            have = np.unique(ts // HOUR)
+            hrs = np.array([r[0] // HOUR for r in hours], np.int64)
+            miss = [r for r, held in zip(hours, np.isin(hrs, have)) if not held and r[5] > 0]
+            fine_tf = venue.coarse_tfs[0]
+            rows, i = [], 0
+            while i < len(miss):                                 # one fine request covers the missing hours of its window,
+                a = miss[i][0]                                   # which ends on an hour boundary (no hour half-filled)
+                b = min(max((a + venue.window * fine_tf * MINUTE) // HOUR * HOUR, a + HOUR) - 1, hi - 1)
+                fine = {}
+                if fine_tf < 60:
+                    for r in venue.coarse(symbol, fine_tf, a, b, stop=stop):
+                        fine.setdefault(r[0] // HOUR, []).append(r)
+                    if stop and stop():
+                        return
+                while i < len(miss) and miss[i][0] <= b:
+                    rows.extend(fine.get(miss[i][0] // HOUR) or [miss[i]])
+                    i += 1
+        except Exception:
             return
-        have = np.unique(ts // HOUR)
-        hrs = np.array([r[0] // HOUR for r in hours], np.int64)
-        miss = [r for r, h, held in zip(hours, hrs, np.isin(hrs, have)) if not held and r[5] > 0]
-        fine_tf = venue.coarse_tfs[0]
-        rows, i = [], 0
-        while i < len(miss):                                     # one fine request covers the missing hours of its window
-            a = miss[i][0]
-            b = min(a + venue.window * fine_tf * MINUTE - 1, hi - 1)
-            fine = {}
-            if fine_tf < 60:
-                for r in venue.coarse(symbol, fine_tf, a, b, stop=stop):
-                    fine.setdefault(r[0] // HOUR, []).append(r)
-                if stop and stop():
-                    return
-            while i < len(miss) and miss[i][0] <= b:
-                rows.extend(fine.get(miss[i][0] // HOUR) or [miss[i]])
-                i += 1
         if rows:
             take(sorted(rows))
             filled[0] += len(miss)
@@ -861,21 +874,27 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
                         return finish("stopped")
                     side["head"] = HEAD_VERSION
                 elif venue.head_check and side.get("head") != HEAD_VERSION:
+                    sure = True
                     try:
                         deeper = venue.first_ms(symbol)
+                        sure = venue.first_is_sure(symbol)
                     except LookupError:
                         deeper = None
+                    except Exception:                            # the network: checked again next time, the tail goes on
+                        deeper, sure = None, False
                     if deeper is not None and deeper < first:
                         if not head(deeper, first - MINUTE):
                             return finish("stopped")
                         first = deeper
-                    side["head"] = HEAD_VERSION
+                    if sure:
+                        side["head"] = HEAD_VERSION
             else:
                 first = venue.first_ms(symbol)
                 if first is None:
                     raise LookupError(f"{venue.title} has no candles for {symbol}")
                 cursor = first
-                side["head"] = HEAD_VERSION
+                if venue.first_is_sure(symbol):                  # else the head check looks again next time
+                    side["head"] = HEAD_VERSION
             side["first"] = first
             side["history_done"] = True                          # forward venues start at the first candle
             span = max(1, now_ms - first)
