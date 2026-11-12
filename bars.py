@@ -2,7 +2,11 @@
 
 Dollar bars follow Lopez de Prado (AFML ch. 2): a bar closes with the candle whose turnover brings the
 dollars traded SINCE THE BAR OPENED up to the threshold, so every completed bar holds >= size (plus the
-overflow of its last minute). Time bars are the usual 1h/4h/1D/1W/1M candles; weeks start Monday 00:00 UTC.
+overflow of its last minute). Adaptive dollar bars do the same with a size that follows the market: a bar
+starting on day D is sized as the median daily turnover of the 30 complete days before D divided by a target
+number of bars a day, so a coin whose trading grew 100x keeps a similar number of bars a day through its
+whole history (only past days decide a size, never the bar's own day or later). Time bars are the usual
+1h/4h/1D/1W/1M candles; weeks start Monday 00:00 UTC.
 Every bar's `t` is its open time (seconds), like TradingView; `e` is its close time.
 """
 import numpy as np
@@ -10,6 +14,8 @@ import pandas as pd
 
 SIZE_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10]        # dollar sizes offered = the market's median day x these
 MEDIAN_TFS = ["1h", "4h", "1W", "1M"]            # also offered: the median hour, 4 hours, week and month
+ADAPTIVE = [24, 6, 1]                            # adaptive sets: about this many bars a day
+ADAPT_DAYS = 30                                  # each day's adaptive size comes from the median of the days before it
 TIMEFRAMES = ["1h", "4h", "1D", "1W", "1M"]
 MINUTE = 60_000
 DAY = 86_400_000
@@ -89,6 +95,49 @@ def dollar_bars(cd: Candles, size: float, start: int = 0):
         out.append(cd.bar(start + i, start + j))
         i = j + 1
     forming = cd.bar(start + i, n - 1) if i < len(cum) else None
+    return out, forming, start + i
+
+
+def day_sizes(cd: Candles, per_day: float, d_from: int, d_to: int) -> dict:
+    """{epoch day: adaptive bar size} for days d_from..d_to: the median turnover of the ADAPT_DAYS complete days
+    before each (from the market's first day on; a day without candles counts as $0), over per_day. The first
+    day has no past: it uses its own total. Never below $1."""
+    n = cd.n
+    first = int(cd.ts[0] // DAY)
+    lo = max(first, d_from - ADAPT_DAYS)
+    i0 = int(np.searchsorted(cd.ts[:n], lo * DAY))
+    tot = np.bincount((cd.ts[i0:n] // DAY - lo).astype(np.int64), weights=cd.d[i0:n], minlength=d_to - lo + 1)
+    out = {}
+    for d in range(d_from, d_to + 1):
+        past = tot[max(lo, d - ADAPT_DAYS) - lo:d - lo]
+        med = float(np.median(past)) if len(past) else float(tot[d - lo])
+        out[d] = max(med / per_day, 1.0)
+    return out
+
+
+def adaptive_bars(cd: Candles, per_day: float, start: int = 0):
+    """Like dollar_bars, but each bar's size is its first minute's day size (day_sizes); every bar carries it as "z"."""
+    n = cd.n
+    if start >= n:
+        return [], None, start
+    cum = np.cumsum(cd.d[start:n])
+    days = cd.ts[start:n] // DAY
+    size_of = day_sizes(cd, per_day, int(days[0]), int(days[-1]))
+    out, i = [], 0
+    while i < len(cum):
+        base = cum[i - 1] if i > 0 else 0.0
+        z = size_of[int(days[i])]
+        j = int(np.searchsorted(cum, base + z, side="left"))
+        if j >= len(cum):
+            break
+        b = cd.bar(start + i, start + j)
+        b["z"] = int(round(z))
+        out.append(b)
+        i = j + 1
+    forming = None
+    if i < len(cum):
+        forming = cd.bar(start + i, n - 1)
+        forming["z"] = int(round(size_of[int(days[i])]))
     return out, forming, start + i
 
 
@@ -190,10 +239,13 @@ def build_all(cd: Candles) -> tuple[dict, dict]:
     for s in sizes:
         bars, forming, st = dollar_bars(cd, s)
         sets[size_key(s)] = {"bars": bars, "forming": forming, "start": st, "size": s}
+    for k in ADAPTIVE:
+        bars, forming, st = adaptive_bars(cd, k)
+        sets[f"a:{k}"] = {"bars": bars, "forming": forming, "start": st, "per_day": k}
     for tf in TIMEFRAMES:
         bars, forming, st = time_bars(cd, tf)
         sets["t:" + tf] = {"bars": bars, "forming": forming, "start": st, "tf": tf}
-    meta = {"auto_size": auto, "sizes": sizes, "medians": medians, "timeframes": TIMEFRAMES,
+    meta = {"auto_size": auto, "sizes": sizes, "medians": medians, "adaptive": ADAPTIVE, "timeframes": TIMEFRAMES,
             "first": int(cd.ts[0] // 1000), "last": int(cd.ts[cd.n - 1] // 1000), "n_candles": int(cd.n)}
     cd.touched = cd.n
     return sets, meta
@@ -204,10 +256,13 @@ def update_all(sets: dict, cd: Candles) -> None:
     A dollar bar that closed on a candle this upsert rewrote (a minute first seen while still forming) is
     re-cut with the fuller candle, even when later minutes arrived in the same upsert."""
     for key, s in sets.items():
-        if key.startswith("d:"):
+        if key[:2] in ("d:", "a:"):
             while s["bars"] and s["start"] - 1 >= cd.touched:    # its closing candle changed: cut it again
                 s["start"] -= s["bars"].pop()["n"]
-            bars, forming, st = dollar_bars(cd, s["size"], s["start"])
+            if key.startswith("d:"):
+                bars, forming, st = dollar_bars(cd, s["size"], s["start"])
+            else:
+                bars, forming, st = adaptive_bars(cd, s["per_day"], s["start"])
         else:
             bars, forming, st = time_bars(cd, s["tf"], s["start"])
         s["bars"].extend(bars)

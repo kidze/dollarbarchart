@@ -28,6 +28,15 @@ def synthetic(n_minutes: int, seed: int = 0, start_ms: int = 1_700_000_000_000 /
                          "volume": turnover / close, "turnover": turnover})
 
 
+def fresh(full, k, s):
+    """What a full build gives for set k (s = the incrementally kept set)."""
+    if k.startswith("d:"):
+        return B.dollar_bars(full, s["size"])
+    if k.startswith("a:"):
+        return B.adaptive_bars(full, s["per_day"])
+    return B.time_bars(full, s["tf"])
+
+
 def test_every_completed_dollar_bar_reaches_its_size():
     df = synthetic(60_000)
     cd = B.Candles(df)
@@ -69,7 +78,7 @@ def test_incremental_update_matches_full_rebuild():
         B.update_all(sets, cd)
     full = B.Candles(df)                                         # same sizes as the sets were built with (the auto size is fixed at build time)
     for k, s in sets.items():
-        bars, forming, _ = B.dollar_bars(full, s["size"]) if k.startswith("d:") else B.time_bars(full, s["tf"])
+        bars, forming, _ = fresh(full, k, s)
         assert s["bars"] == bars, k
         assert s["forming"] == forming, k
     assert np.array_equal(cd.frame()["volume"].to_numpy(), df["volume"].to_numpy())
@@ -107,7 +116,7 @@ def test_live_poll_recuts_a_bar_closed_on_a_partial_minute():
         B.update_all(sets, cd)
     full = B.Candles(df)
     for k, s in sets.items():
-        bars, forming, _ = B.dollar_bars(full, s["size"]) if k.startswith("d:") else B.time_bars(full, s["tf"])
+        bars, forming, _ = fresh(full, k, s)
         assert s["bars"] == bars, k
         assert s["forming"] == forming, k
 
@@ -149,6 +158,26 @@ def test_nearest_size_matches_the_page_fallback():
     assert B.nearest_size(sizes, "30000000000", 5.2e9) == 3.4e10
     assert B.nearest_size(sizes, "1e13", 5.2e9) == 1.5e11
     assert B.nearest_size(sizes, "null", 5.2e9) == 5.2e9 == B.nearest_size(sizes, "0", 5.2e9) == B.nearest_size(sizes, "x", 5.2e9)
+
+
+def test_adaptive_bars_keep_a_steady_count_while_volume_grows_100x():
+    """$1M a minute for 60 days, then $100M a minute: fixed bars go from ~1 a day to ~100 a day, adaptive ones
+    stay near their target once their 30-day window has caught up, and a size only uses days before its bar."""
+    start = 1_700_000_000_000 // DAY_MS * DAY_MS
+    ts = start + np.arange(150 * 1440) * B.MINUTE
+    d = np.where(ts < start + 60 * DAY_MS, 1e6, 1e8)
+    one = np.ones(len(ts))
+    cd = B.Candles(pd.DataFrame({"ts": ts, "open": one, "high": one, "low": one, "close": one, "volume": d, "turnover": d}))
+    bars, forming, _ = B.adaptive_bars(cd, 6)
+    per_day = pd.Series(1, index=[b["t"] // 86400 for b in bars]).groupby(level=0).sum()
+    day0 = start // DAY_MS
+    assert per_day.loc[day0 + 1:day0 + 59].between(5, 7).all()         # steady before the jump
+    assert per_day.loc[day0 + 60:day0 + 74].min() >= 100                # the jump: the past 30 days still say "small"
+    assert per_day.loc[day0 + 76:day0 + 148].between(5, 7).all()        # caught up: steady again
+    assert all(b["z"] == round(1e6 * 1440 / 6) for b in bars if b["t"] // 86400 < day0 + 60 and b["t"] // 86400 > day0)
+    assert forming is None or forming["z"] > 0
+    sets, meta = B.build_all(cd)
+    assert meta["adaptive"] == B.ADAPTIVE and all(f"a:{k}" in sets for k in B.ADAPTIVE)
 
 
 def test_upsert_replaces_same_minute_and_ignores_older():
