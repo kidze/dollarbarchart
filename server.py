@@ -341,7 +341,8 @@ def source_text(m: Market) -> str:
         return ("Combined: " + (" + ".join(parts) if parts else "every exchange that lists it") +
                 ". 1-minute candles; dollars are summed across exchanges, each price is the dollar-weighted median of the exchanges "
                 "that traded that minute" + (f" ({', '.join(approx)} report coin volume only: dollars = volume × close)" if approx else "") +
-                f"; a price {C.SPIKE:g}× away from the minutes around it that no second exchange shows is a bad print and is repaired"
+                f"; a price {C.SPIKE:g}× away from the minutes around it that no second exchange shows is a bad print and is repaired,"
+                f" and a minute only a much smaller exchange traded is held within {C.LONE_BAND:.0%} of the bigger ones around it"
                 "; hours an exchange serves no minutes for are filled from its 5-minute or hourly candles where it has them")
     info = market_info(m.key)
     what = "perpetual" if info["kind"] == "perp" else "spot"
@@ -663,11 +664,12 @@ def merged_frame(m: Market) -> pd.DataFrame:
     m.weights = {lab: float(f["turnover"].to_numpy(float)[f["ts"].to_numpy(np.int64) > int(f["ts"].iloc[-1]) - C.DAY].clip(min=0).sum())
                  for lab, f in zip(labels, frames)}
     cp, cj = cache_paths(ticker)
-    base, cut = None, None
+    base, cut, written = None, None, None
     try:
         side = json.loads(cj.read_text(encoding="utf-8")) if cj.exists() else None
         if side and side.get("method") == C.METHOD and sorted(side["parts"]) == sorted(labels):
             cut = int(side["last"])
+            written = int(side.get("written", cut))              # (the day it was written: "last" may be older, a market whose data stopped)
             if all(side["parts"][lab] == [int(f["ts"].iloc[0]), int(np.searchsorted(f["ts"].to_numpy(np.int64), cut))]
                    for lab, f in zip(labels, frames)):
                 base = pd.read_parquet(cp)
@@ -682,19 +684,20 @@ def merged_frame(m: Market) -> pd.DataFrame:
         merged, fixed = C.despike(merged, frames, start=len(base))
         if fixed:
             log(f"{m.key}: {fixed} off-price minutes no other exchange confirms repaired")
-        if not (complete and today - cut >= CACHE_REFRESH_DAYS * C.DAY):
+        if not (complete and today - written >= CACHE_REFRESH_DAYS * C.DAY):
             return merged
     else:
         merged, fixed = C.despike(C.merge(frames), frames)
         if fixed:
             log(f"{m.key}: {fixed} off-price minutes no other exchange confirms repaired")
     if complete:
-        cut = today                                              # complete days only: today keeps changing
+        cut = min(today, int(merged["ts"].iloc[-1]) - C.LONE_SPAN * C.MINUTE) if len(merged) else today   # complete days only (today keeps
+                                                                 # changing), and not the minutes lone_bands() has not checked yet
         try:
             head = merged[merged["ts"] < cut]
             X.write_durably(cp, lambda fh: head.to_parquet(fh, index=False))
             fp = {lab: [int(f["ts"].iloc[0]), int(np.searchsorted(f["ts"].to_numpy(np.int64), cut))] for lab, f in zip(labels, frames)}
-            X.write_durably(cj, lambda fh: fh.write(json.dumps({"method": C.METHOD, "last": cut, "parts": fp}).encode()))
+            X.write_durably(cj, lambda fh: fh.write(json.dumps({"method": C.METHOD, "last": cut, "written": today, "parts": fp}).encode()))
         except Exception as e:
             log(f"{m.key}: merge cache not written: {type(e).__name__}: {e}")
     return merged

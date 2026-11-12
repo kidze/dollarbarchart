@@ -650,6 +650,173 @@ def test_bitstamp_finds_the_first_candle_of_a_pair_listed_years_after_it_opened(
     finally:
         V._get = real
 
+
+class FakeArchive(Fake):
+    """A Kraken-like venue: an archive streamed in chunks for the first rows, its API for the rest."""
+    def __init__(self, df, now_ms, archived):
+        super().__init__(df, now_ms)
+        self.archived, self.streams = archived, []
+
+    def stream(self, symbol, after_ms, stop=None):
+        self.streams.append(after_ms)
+        rows = rows_of(self.archived[self.archived["ts"] > after_ms])
+        for i in range(0, len(rows), 100):
+            yield rows[i:i + 100]
+            if stop and stop():
+                return
+
+    def fetch(self, symbol, start_ms, end_ms, stop=None):
+        assert start_ms > int(self.archived["ts"].iloc[-1]), "the API is asked only for what the archive does not have"
+        return super().fetch(symbol, start_ms, end_ms, stop)
+
+
+def test_an_archive_is_streamed_first_resumes_after_a_stop_and_the_api_takes_over():
+    scratch()
+    full = series(T0, 900, seed=20)
+    v = FakeArchive(full, int(full["ts"].iloc[-1]), full.iloc[:600])
+    chunks = {"n": 0}
+    orig = v.stream
+
+    def counted(symbol, after_ms, stop=None):
+        for c in orig(symbol, after_ms, stop):
+            chunks["n"] += 1
+            yield c
+    v.stream = counted
+    res = V.sync(v, "K", stop=lambda: chunks["n"] >= 2)
+    side = V.load_side("fake", "K")
+    assert res["result"] == "stopped" and res["n"] == 200 and not side.get("stream_done")
+    res = V.sync(v, "K")
+    assert res["result"] == "done" and V.load_side("fake", "K")["stream_done"]
+    assert v.streams == [-1, T0 + 199 * M]                           # resumed after the last stored minute
+    assert V.load("fake", "K")["ts"].tolist() == full["ts"].tolist()
+    n0, s0 = v.requests, len(v.streams)
+    V.sync(v, "K")
+    assert len(v.streams) == s0 and v.requests - n0 == 1             # streamed once: later syncs use the API only
+
+
+def test_kraken_trades_become_minutes_and_a_window_moves_past_a_quiet_tail():
+    k = V.Kraken()
+    t = T0
+    trades = [[t + 1000, 10.0, 1.0], [t + 2000, 12.0, 2.0], [t + 59000, 9.0, 1.0], [t + M + 5, 11.0, 3.0]]
+    assert k._minutes(trades) == [[t, 10.0, 12.0, 9.0, 9.0, 4.0, 10.0 + 24.0 + 9.0], [t + M, 11.0, 11.0, 11.0, 11.0, 3.0, 33.0]]
+    pages = [[[t + i * 30_000, 100.0 + i, 1.0] for i in range(1000)], [[t + 1000 * 30_000 + i, 50.0, 1.0] for i in range(3)]]
+    calls = []
+
+    def fake_trades(symbol, since_ns, stop=None):
+        calls.append(since_ns)
+        page = pages[len(calls) - 1] if len(calls) <= len(pages) else []
+        return page, (page[-1][0] * 1_000_000 if page else since_ns)
+    k._trades = fake_trades
+    set_now(t + 10 * V.DAY)
+    end = t + 1440 * M - 1
+    rows = k.fetch("XBTUSD", t, end)
+    assert calls[0] == t * 1_000_000 - 1 and len(calls) == 2         # since is exclusive; paged until the trades ran out
+    assert rows[0][0] == t and rows[-1] == [end // M * M, rows[-2][4], rows[-2][4], rows[-2][4], rows[-2][4], 0.0, 0.0]
+    assert all(r[5] > 0 for r in rows[:-1]) and sum(r[5] for r in rows) == 1003.0
+
+
+def test_a_file_the_archive_did_not_write_is_streamed_from_the_start():
+    """A Kraken file holding only newer API rows (its side file lost, say): the archive is streamed whole, not
+    from the file's newest minute, so the history before it arrives (the review's case)."""
+    scratch()
+    full = series(T0, 900, seed=21)
+    v = FakeArchive(full, int(full["ts"].iloc[-1]), full.iloc[:600])
+    V.save("fake", "P", full.iloc[700:].reset_index(drop=True))
+    res = V.sync(v, "P")
+    assert v.streams == [-1] and res["result"] == "done" and V.load_side("fake", "P")["stream_done"]
+    assert V.load("fake", "P")["ts"].tolist() == full["ts"].tolist()     # the gap between the archive and the file too
+
+
+def test_a_minute_only_a_thinner_exchange_traded_is_held_near_the_bigger_ones():
+    """Kraken's thin 2014 BTC/USD book: a lone print 27% below while Bitstamp traded around it. Far less than the 2x
+    of a bad print, but a wick the market never had: held to LONE_BAND beyond the bigger exchange's range."""
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=31)
+    thin = series(T0, n, dollars=1e3, seed=31)
+    gone = [1000, 2000, 2500, 3000, 3500, n - 2]                     # minutes the big exchange did not trade
+    big = big.drop(index=gone).reset_index(drop=True)
+    for k in (1000, 2000):                                           # a whole candle 27% low
+        thin.loc[k, ["open", "high", "low", "close"]] = thin.loc[k, "close"] * 0.73
+    thin.loc[2500, "low"] = thin.loc[2500, "close"] * 0.9           # a 10% wick
+    thin.loc[3000, "high"] = thin.loc[3000, "close"] * 1.02         # 2%: within the band, kept
+    thin.loc[n - 2, "low"] = thin.loc[n - 2, "close"] * 0.8         # the newest minutes: nothing after them yet
+    merged = C.merge([big, thin])
+    out, fixed = C.despike(merged, [big, thin])
+    row = lambda df, k: df[df["ts"] == T0 + k * M].iloc[0]
+    assert fixed == 2
+    assert all(row(out, 2000)[c] == row(merged, 1999)["close"] for c in C.PX)          # a flat candle at the last price
+    assert row(out, 2500)["low"] == min(row(merged, 2500)["open"], row(merged, 2500)["close"])
+    assert row(out, 3000)["high"] == row(merged, 3000)["high"] and row(out, n - 2)["low"] == row(merged, n - 2)["low"]
+    assert row(out, 1000)["low"] == row(merged, 1000)["low"]        # its first day: no say to compare yet
+    keep = ~merged["ts"].isin([T0 + 2000 * M, T0 + 2500 * M])
+    assert out[keep].equals(merged[keep])
+
+
+def test_a_lone_minute_of_a_bigger_or_similar_exchange_or_with_nobody_around_is_left_alone():
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=32)
+    mid = series(T0, n, dollars=5e5, seed=32)                        # half the big one's dollars: not LONE_RATIO smaller
+    thin = series(T0, n, dollars=1e3, seed=32)
+    big.loc[2000, "low"] = big.loc[2000, "close"] * 0.85             # the exchange with the say moves alone: the market
+    mid.loc[2500, "low"] = mid.loc[2500, "close"] * 0.9              # a similar-sized exchange alone: two real markets
+    quiet = list(range(2990, 3011))                                  # nobody else trades within 5 minutes of minute 3000
+    drop = lambda f, ks: f[~f["ts"].isin([T0 + k * M for k in ks])].reset_index(drop=True)
+    big = drop(big, [2500] + quiet)
+    mid = drop(mid, [2000] + quiet)
+    thin = drop(thin, [2000, 2500] + [k for k in quiet if k != 3000])
+    thin.loc[thin["ts"] == T0 + 3000 * M, "low"] *= 0.85
+    merged = C.merge([big, mid, thin])
+    out, fixed = C.despike(merged, [big, mid, thin])
+    assert fixed == 0 and out.equals(merged)
+
+
+def test_the_lone_rule_holds_to_the_bigger_exchange_only_and_skips_a_missing_price():
+    """(the review's cases) A third, small exchange's wild print near the minute does not widen the band, and a
+    missing (NaN) price of the bigger exchange there does not switch the rule off."""
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=33)
+    thin = series(T0, n, dollars=1e3, seed=33)
+    tiny = series(T0, n, dollars=5e2, seed=33)
+    big = big[big["ts"] != T0 + 2000 * M].reset_index(drop=True)
+    tiny = tiny[tiny["ts"] != T0 + 2000 * M].reset_index(drop=True)
+    thin.loc[2000, ["open", "high", "low", "close"]] = thin.loc[2000, "close"] * 0.73
+    tiny.loc[tiny["ts"] == T0 + 1999 * M, "low"] = 1.0              # tiny's own bad print, a minute before
+    big.loc[big["ts"] == T0 + 1998 * M, "low"] = np.nan
+    merged = C.merge([big, thin, tiny])
+    out, fixed = C.despike(merged, [big, thin, tiny])
+    row = lambda df, k: df[df["ts"] == T0 + k * M].iloc[0]
+    assert row(out, 2000)["low"] == row(merged, 1999)["close"]
+
+
+def test_a_move_the_smaller_exchange_trades_first_is_not_held_back():
+    """(the review's case) The bigger exchange is silent for 10 minutes while the smaller one trades a real 8% step:
+    nothing holds the step back (the bigger one did not trade after it within the span)."""
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=34)
+    thin = series(T0, n, dollars=1e3, seed=34)
+    for f in (big, thin):
+        f.loc[f.index >= 2000, ["open", "high", "low", "close"]] *= 0.92
+    big = big[~big["ts"].between(T0 + 2000 * M, T0 + 2009 * M)].reset_index(drop=True)
+    merged = C.merge([big, thin])
+    out, fixed = C.despike(merged, [big, thin])
+    assert fixed == 0 and out.equals(merged)
+
+
+def test_the_lone_rule_from_a_start_row_matches_the_full_run():
+    """The merge cache's incremental call (start = rows already checked) gives the same rows as the full run."""
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=35)
+    thin = series(T0, n, dollars=1e3, seed=35)
+    big = big.drop(index=[2000, 3000]).reset_index(drop=True)
+    thin.loc[2000, "low"] = thin.loc[2000, "close"] * 0.8
+    thin.loc[3000, "high"] = thin.loc[3000, "close"] * 1.2
+    merged = C.merge([big, thin])
+    full, fixed = C.despike(merged, [big, thin])
+    assert fixed == 2
+    for start in (1000, 2500, 2999):
+        part, _ = C.despike(merged, [big, thin], start=start)
+        assert part.iloc[start:].equals(full.iloc[start:]) and part.iloc[:start].equals(merged.iloc[:start])
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
