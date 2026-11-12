@@ -7,6 +7,11 @@ the money, and a dominant venue counts for what it traded. Minutes nobody traded
 first frame that has them (frames come in priority order). Done in numpy, in chunks of minutes, so a BTC-sized
 merge (ten series of several million rows) takes seconds and bounded memory.
 
+despike() repairs the merged prices no second exchange confirms: a minute whose price is SPIKE times away from
+the median close of the minutes before it and of those after it, shown by only one exchange (the only one trading then, like Bitfinex's
+BTC trades at $0.01 in April 2013, or one holding most of the say). Market-wide moves, which every exchange
+shows, are kept.
+
 trust() decides how much of a venue's history belongs to the coin the app means by a ticker: an exchange
 can reuse a ticker for another coin, or relist one after a long break.
 """
@@ -24,7 +29,11 @@ RELIST_MOVE = 2.0                                                # ... it is, wh
 MISMATCH = 0.30                                                  # a day whose close is this far from the reference's is another coin
 MISMATCH_DAYS, MISMATCH_SPAN = 3, 30 * DAY                       # ... once this many such days fall within this span
 WEIGHT_SPAN = DAY                                                # an exchange's say in a minute's price: its dollars over the day before
-METHOD = 2                                                       # the merge rule's version (a cached merge made by another is redone)
+METHOD = 3                                                       # the merge rule's version (a cached merge made by another is redone)
+SPIKE = 2.0                                                      # a merged price above SPIKE x (or below 1/SPIKE x) the median close ...
+SPIKE_ROWS = 30                                                  # ... of this many merged minutes either side is an off-price print ...
+CONFIRM = 2                                                      # ... unless this many exchanges show such a price within a minute of it
+MINUTE = 60_000
 JUMP = 4.0                                                       # a day whose price is this many times the day before's: another coin took the symbol
 
 
@@ -119,6 +128,125 @@ def merge_rows(row_lists: list, weights=None) -> list:
 def _merge_by_rows(frames: list) -> pd.DataFrame:
     """A few rows without known weights: each venue weighs its own dollars of these rows."""
     return merge(frames, weights=[max(float(f["turnover"].clip(lower=0).sum()), 0.0) for f in frames])
+
+
+def spike_refs(close: np.ndarray) -> tuple:
+    """(median close of the SPIKE_ROWS minutes before each minute, of the SPIKE_ROWS after it); NaN where there are none."""
+    s = pd.Series(close)
+    back = s.rolling(SPIKE_ROWS, min_periods=1).median().shift(1).to_numpy()
+    fwd = s[::-1].reset_index(drop=True).rolling(SPIKE_ROWS, min_periods=1).median().shift(1).to_numpy()[::-1]
+    return back, fwd
+
+
+def despike(merged: pd.DataFrame, frames: list, start: int = 0, ref=None, weights=None) -> tuple:
+    """Repair the off-price prints in merged rows start.. that no second exchange confirms. Returns (frame, number
+    of minutes repaired). frames = the merge's input (priority order); ref = one reference price per row from
+    start on (default: the median close of the SPIKE_ROWS merged minutes before each and of the SPIKE_ROWS after
+    it, spike_refs, with the rows before start as context); weights = one say per frame (default: each exchange's
+    dollars over the day before the minute).
+    A price is a bad print when it is SPIKE times below (above) the minutes before it AND the minutes after it: a
+    step to a new price level (sparse early history, a listing) is near one side and stays. It stands anyway when
+    CONFIRM exchanges that traded within a minute of it went that far the same way (a crash every exchange shows).
+    Otherwise it takes the dollar-weighted median of the exchanges whose price there is not a bad print, and when
+    there is none (the only exchange trading then): the open becomes the previous close, the close the open, and
+    the high and low the candle's body."""
+    n = len(merged)
+    if start >= n or not len(frames):
+        return merged, 0
+    ts = merged["ts"].to_numpy(np.int64)
+    px = merged[list(PX)].to_numpy(float)
+    if ref is None:
+        lo = max(0, start - SPIKE_ROWS)
+        back, fwd = spike_refs(px[lo:, 3])
+        back, fwd = back[start - lo:], fwd[start - lo:]
+    else:
+        back = fwd = np.asarray(ref, float)
+    with np.errstate(invalid="ignore"):
+        low_b = np.fmin(back, fwd) / SPIKE                      # NaN only where neither side has minutes
+        high_b = np.fmax(back, fwd) * SPIKE
+        center = np.where(np.isnan(back), fwd, back)
+        seg = px[start:]
+        bad = (seg < low_b[:, None]) | (seg > high_b[:, None])
+    rows = np.flatnonzero(bad.any(axis=1))
+    if not len(rows):
+        return merged, 0
+    src = [(f["ts"].to_numpy(np.int64), f[list(PX)].to_numpy(float), f["turnover"].to_numpy(float)) for f in frames]
+    cums = {}
+
+    def say(j: int, t: int) -> float:
+        if weights is not None:
+            return float(weights[j])
+        if j not in cums:
+            cums[j] = np.concatenate([[0.0], np.cumsum(np.maximum(src[j][2], 0.0))])
+        sts, cum = src[j][0], cums[j]
+        return float(cum[np.searchsorted(sts, t)] - cum[np.searchsorted(sts, t - WEIGHT_SPAN)])
+
+    px = px.copy()
+    fixed = 0
+    for r in rows:                                               # oldest first: a repaired close is the next open's fallback
+        i, t = start + int(r), int(ts[start + int(r)])
+        lo_b, hi_b = low_b[r], high_b[r]
+        new, lone = px[i].copy(), []
+        for c in range(4):
+            x = px[i, c]
+            if not (x < lo_b or x > hi_b):
+                continue
+            down, confirm, vals, ws, own = x < lo_b, 0, [], [], []
+            for j, (sts, spx, sd) in enumerate(src):
+                a, b = np.searchsorted(sts, [t - MINUTE, t + MINUTE + 1])
+                if a == b:
+                    continue
+                traded = sd[a:b] > 0
+                if not traded.any():
+                    continue
+                near = spx[a:b, c][traded]
+                if (near.min() < lo_b) if down else (near.max() > hi_b):
+                    confirm += 1
+                k = int(np.searchsorted(sts, t))
+                if k < len(sts) and sts[k] == t and sd[k] > 0 and lo_b <= spx[k, c] <= hi_b:
+                    vals.append(spx[k, c])
+                    ws.append(say(j, t))
+                    own.append(sd[k])
+            if confirm >= CONFIRM:
+                continue
+            if vals:
+                w = np.asarray(ws)
+                w = w if w.sum() > 0 else np.asarray(own)                # nobody has a day behind it: the minute's dollars, as merge()
+                new[c] = weighted_median(np.asarray(vals)[None, :], w[None, :])[0]
+            else:
+                lone.append(c)
+        if 0 in lone:
+            prev = px[i - 1, 3] if i > 0 else np.nan
+            new[0] = prev if lo_b <= prev <= hi_b else center[r]
+        if 3 in lone:
+            new[3] = new[0] if lo_b <= new[0] <= hi_b else center[r]
+        if 1 in lone:
+            new[1] = max(new[0], new[3])
+        if 2 in lone:
+            new[2] = min(new[0], new[3])
+        new[1] = max(new[1], new[0], new[3])
+        new[2] = min(new[2], new[0], new[3])
+        if not np.array_equal(new, px[i]):
+            px[i] = new
+            fixed += 1
+    if not fixed:
+        return merged, 0
+    out = merged.copy()
+    out[list(PX)] = px
+    return out, fixed
+
+
+def despike_rows(rows: list, row_lists: list, weights: list, ref: float) -> list:
+    """despike() for a few live merged rows: row_lists = each exchange's newest rows (the merge's input), ref =
+    the chart's recent median close."""
+    if not rows or not ref > 0:
+        return rows
+    merged = pd.DataFrame(rows, columns=COLS)
+    frames = [pd.DataFrame(sorted(r), columns=COLS) if r else _empty() for r in row_lists]
+    out, fixed = despike(merged, frames, ref=np.full(len(merged), float(ref)), weights=weights)
+    if not fixed:
+        return rows
+    return [[int(r[0])] + [float(x) for x in r[1:]] for r in out.itertuples(index=False)]
 
 
 def daily_close(f: pd.DataFrame) -> pd.Series:

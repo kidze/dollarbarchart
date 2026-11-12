@@ -340,7 +340,9 @@ def source_text(m: Market) -> str:
         approx = [s["label"] for s in (m.venues or []) if not s.get("exact", True) and s.get("n")]
         return ("Combined: " + (" + ".join(parts) if parts else "every exchange that lists it") +
                 ". 1-minute candles; dollars are summed across exchanges, each price is the dollar-weighted median of the exchanges "
-                "that traded that minute" + (f" ({', '.join(approx)} report coin volume only: dollars = volume × close)" if approx else ""))
+                "that traded that minute" + (f" ({', '.join(approx)} report coin volume only: dollars = volume × close)" if approx else "") +
+                f"; a price {C.SPIKE:g}× away from the minutes around it that no second exchange shows is a bad print and is repaired"
+                "; hours an exchange serves no minutes for are filled from its 5-minute or hourly candles where it has them")
     info = market_info(m.key)
     what = "perpetual" if info["kind"] == "perp" else "spot"
     return f"Bybit {info['symbol']} {what}, 1-minute candles, dollars = exchange-reported turnover"
@@ -675,12 +677,17 @@ def merged_frame(m: Market) -> pd.DataFrame:
         base = None
     complete = all(s["status"] == "done" or s["status"].startswith("absent") for s in m.venues)
     today = int(time.time() * 1000) // C.DAY * C.DAY
-    if base is not None:
+    if base is not None:                                         # (the cached part was repaired when it was written)
         merged = pd.concat([base, C.merge(frames, since=cut)], ignore_index=True)
+        merged, fixed = C.despike(merged, frames, start=len(base))
+        if fixed:
+            log(f"{m.key}: {fixed} off-price minutes no other exchange confirms repaired")
         if not (complete and today - cut >= CACHE_REFRESH_DAYS * C.DAY):
             return merged
     else:
-        merged = C.merge(frames)
+        merged, fixed = C.despike(C.merge(frames), frames)
+        if fixed:
+            log(f"{m.key}: {fixed} off-price minutes no other exchange confirms repaired")
     if complete:
         cut = today                                              # complete days only: today keeps changing
         try:
@@ -738,7 +745,9 @@ def sync_part(m: Market, s: dict, stop) -> None:
         log(f"{m.key}: {s['label']} failed: {type(e).__name__}: {e}")
         return
     s["n"], s["first"], s["pct"] = res["n"], res["first"], 100.0
-    s["grew"] = s.get("grew") or res["grew_back"] or res["prev_last"] is None
+    if res.get("filled"):
+        log(f"{m.key}: {s['label']}: {res['filled']} hours without minutes filled from its coarser candles")
+    s["grew"] = s.get("grew") or res["grew_back"] or res["prev_last"] is None or bool(res.get("filled"))
     s["status"] = "paused" if res["result"] == "stopped" else "done"
 
 
@@ -904,7 +913,12 @@ def live_rows_all(m: Market) -> tuple:
         for t in [t for t in known if t < newest - 10 * B.MINUTE]:
             del known[t]
         lists.append([known[t] for t in sorted(known) if t >= newest - 2 * B.MINUTE])
-    return C.merge_rows(lists, [m.weights.get(s["label"], 0.0) for s in done]), err
+    weights = [m.weights.get(s["label"], 0.0) for s in done]
+    rows = C.merge_rows(lists, weights)
+    cd = m.cd
+    if cd is not None and cd.n:                                  # a print only one exchange shows, against the chart's last hour
+        rows = C.despike_rows(rows, lists, weights, float(np.median(cd.c[max(0, cd.n - 2 * C.SPIKE_ROWS - 1):cd.n])))
+    return rows, err
 
 
 def scan_batch() -> None:

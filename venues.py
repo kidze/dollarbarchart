@@ -7,8 +7,13 @@ as true as it needs to be. Each series lives in data/<venue>_<SYMBOL>.parquet wi
 remembers whether the history side is complete. Writes go through bybit_sync.write_durably.
 
 Forward venues page from the first candle towards now in fixed windows (Coinbase 300 rows, KuCoin 1500,
-Bitfinex 10000, Binance one day). OKX only pages backwards ("after" = older than), so its tail is walked from
-now back to the newest stored candle and its history from the oldest stored candle back to the listing.
+Bitfinex 10000, Bitstamp 1000, Binance one day). OKX only pages backwards ("after" = older than), so its tail is
+walked from now back to the newest stored candle and its history from the oldest stored candle back to the
+listing. Two one-off repairs of what the first download missed: a venue whose real start is earlier than the
+first candle it reported then (Coinbase's daily candles start 2015-07-20, its minutes 2015-01-26; Binance's
+archive lacks the first months of its oldest perps) has the history before its file's first candle walked once
+(head_check), and a venue with coarser candles where its minutes are missing (Bitfinex has no BTC minutes for
+2014-11-22..12-31, 2015-05 and 2016-04..05, but 5-minute candles) has those hours filled from them (coarse_tfs).
 Binance's history comes from its public archive (data.binance.vision: one zip per month, then one per day);
 only the last day or two, which the archive does not have yet, comes from its REST API (a few requests), and
 the live minutes come from its websocket stream, so the app adds next to nothing to the request weight this
@@ -39,7 +44,9 @@ import bybit_sync as X
 DATA = X.DATA
 COLS = X.COLS
 MINUTE = X.MINUTE
+HOUR = 3_600_000
 DAY = 86_400_000
+HEAD_VERSION = 1                                                 # the head check's version (a series checked by another is checked again)
 UA = X.UA
 STABLE = {"USD", "USDT", "USDC", "UST"}                        # quotes that count as dollars
 FLUSH_ROWS = 250_000                                             # rows held in memory before the parquet is rewritten
@@ -89,6 +96,15 @@ class Venue:
     reverse = False
     exact_dollars = True                                         # False = dollars approximated as volume x close
     quotes = ("USDT", "USDC", "USD")                             # preferred quote first
+    head_check = False                                           # True: first_ms may now find history before a stored file's first candle
+    coarse_tfs = ()                                              # (finest, ..., 60): candle minutes coarse() serves, to fill missing hours
+    drop_empty = False                                           # True: candles without volume are the venue's padding, not stored
+
+    def coarse(self, symbol: str, minutes: int, start_ms: int, end_ms: int, stop=None) -> list:   # coarser candles, ascending
+        raise NotImplementedError
+
+    def first_is_sure(self, symbol: str) -> bool:                # False: first_ms fell back to a source that may start late
+        return True
 
     def instruments(self) -> list:                               # [{"symbol", "base", "quote", "kind", "list_ms"}]
         raise NotImplementedError
@@ -117,6 +133,8 @@ class Binance(Venue):
     title = "Binance"
     window = 1440
     pause = 0.0
+    head_check = True                                            # the archive starts 2020-01 for perps listed in 2019 (BTCUSDT 2019-09-08)
+    HISTORY_PAUSE = 1.0                                          # seconds after each REST request for a past day the archive lacks
     VISION = "https://data.binance.vision/"
     S3 = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision?delimiter=/&prefix="
     ARCHIVE = {"spot": "data/spot", "perp": "data/futures/um"}
@@ -127,6 +145,10 @@ class Binance(Venue):
         self._months = {}                                        # (kind, symbol) -> ("YYYY-MM", rows array or None = not in the archive)
         self._lock = threading.Lock()
         self._streams = {}
+        self._unsure = set()                                     # symbols whose last first_ms could not ask the REST API
+
+    def first_is_sure(self, symbol: str) -> bool:
+        return symbol not in self._unsure
 
     @staticmethod
     def split(symbol: str) -> tuple:
@@ -218,14 +240,29 @@ class Binance(Venue):
             rows = self._archive(kind, sym, "daily", dt.strftime("%Y-%m-%d"), stop)
             if rows is not None and len(rows):
                 return rows.tolist()
-        return self._rest(kind, sym, day_ms, day_ms + DAY - 1, stop)
+        rows = self._rest(kind, sym, day_ms, day_ms + DAY - 1, stop)
+        if day_ms < today - DAY:                                 # a past day the archive lacks: one request a second at most
+            time.sleep(self.HISTORY_PAUSE)
+        return rows
 
     def forget(self, symbol: str) -> None:
         with self._lock:
             self._months.pop(self.split(symbol), None)
 
     def first_ms(self, symbol: str):
+        """The REST API's first candle (one request: the archive lacks the first months of the oldest perps),
+        else (REST failing: a ban, the network) the archive's, which first_is_sure() then says may be late."""
         kind, sym = self.split(symbol)
+        url, _ = self.REST[kind]
+        try:
+            d = _get(f"{url}?symbol={sym}&interval=1m&startTime=0&limit=1", attempts=3)
+            self._unsure.discard(symbol)
+            if d:
+                return int(d[0][0])
+        except LookupError:
+            raise
+        except Exception:
+            self._unsure.add(symbol)
         for period in ("monthly", "daily"):
             keys = self._keys(kind, sym, period)
             if keys:
@@ -233,8 +270,7 @@ class Binance(Venue):
                 rows = self._archive(kind, sym, period, name)
                 if rows is not None and len(rows):
                     return int(rows[0, 0])
-        rows = self._rest(kind, sym, 0, int(time.time() * 1000), attempts=3)[:1]
-        return int(rows[0][0]) if rows else None
+        return None
 
     def fetch(self, symbol: str, start_ms: int, end_ms: int, stop=None) -> list:
         kind, sym = self.split(symbol)
@@ -454,6 +490,9 @@ class Coinbase(Venue):
     exact_dollars = False
     quotes = ("USD", "USDT", "USDC")
     API = "https://api.exchange.coinbase.com"
+    head_check = True                                            # files made before first_ms knew OPENED start at DAILY_FLOOR
+    OPENED = 1_422_230_400_000                                   # 2015-01-26, the exchange's first day: 1-minute candles go back to it ...
+    DAILY_FLOOR = 1_437_350_400_000                              # ... while daily (and 5m+) candles start 2015-07-20 (checked 2026-11-12)
 
     def instruments(self) -> list:
         r = _get(f"{self.API}/products")
@@ -480,7 +519,8 @@ class Coinbase(Venue):
         while start < now:
             data = self._candles(symbol, 86400, start, min(now, start + 299 * 86_400_000))
             if data:
-                return min(int(x[0]) for x in data) * 1000
+                first = min(int(x[0]) for x in data) * 1000
+                return self.OPENED if first <= self.DAILY_FLOOR else first   # a product of the first days: from opening day
             start += 299 * 86_400_000
             time.sleep(self.pause)
         return None
@@ -540,6 +580,70 @@ class Bitfinex(Venue):
     def latest(self, symbol: str, n: int = 3) -> list:
         return self._rows(_get(f"{self.API}/candles/trade:1m:{self._sym(symbol)}/hist?limit={n}", timeout=10, attempts=1) or [])
 
+    coarse_tfs = (5, 60)                                         # 5m candles cover every BTC/ETH minute hole (checked 2026-11-12)
+    TF = {5: "5m", 15: "15m", 30: "30m", 60: "1h"}
+
+    def coarse(self, symbol: str, minutes: int, start_ms: int, end_ms: int, stop=None) -> list:
+        end_ms = min(int(end_ms), int(time.time() * 1000))
+        out, cur = [], int(start_ms)
+        while cur <= end_ms and not (stop and stop()):
+            url = f"{self.API}/candles/trade:{self.TF[minutes]}:{self._sym(symbol)}/hist?limit={self.window}&sort=1&start={cur}&end={end_ms}"
+            rows = [r for r in self._rows(_get(url, stop=stop) or []) if cur <= r[0] <= end_ms]
+            time.sleep(self.pause)
+            out.extend(rows)
+            if len(rows) < self.window:
+                break
+            cur = rows[-1][0] + minutes * MINUTE
+        return out
+
+
+# ---------------------------------------------------------------- Bitstamp (base volume, forward, BTC 1m since 2011-09)
+
+class Bitstamp(Venue):
+    """Pads every minute after a pair's first trade with a flat zero-volume candle: those are not stored."""
+    name = "bitstamp"
+    title = "Bitstamp"
+    window = 1000                                                # the most a request returns (1001 is a 400)
+    pause = 0.15                                                 # documented limit 8000 requests / 10 min
+    exact_dollars = False
+    drop_empty = True
+    quotes = ("USD", "USDT", "USDC")
+    API = "https://www.bitstamp.net/api/v2"
+
+    def instruments(self) -> list:
+        out = []
+        for it in _get(f"{self.API}/trading-pairs-info/"):
+            base, _, quote = str(it.get("name", "")).partition("/")
+            if it.get("trading") != "Enabled" or quote not in STABLE:
+                continue
+            out.append({"symbol": it["url_symbol"], "base": base, "quote": quote, "kind": "spot", "list_ms": 0})
+        return out
+
+    def label(self, symbol: str, kind: str) -> str:
+        return f"Bitstamp {symbol.upper()}"
+
+    @staticmethod
+    def _rows(r) -> list:                                        # {"data": {"ohlc": [{"timestamp" s, open, high, low, close, volume}]}}
+        rows = [[int(x["timestamp"]) * 1000, float(x["open"]), float(x["high"]), float(x["low"]), float(x["close"]),
+                 float(x["volume"]), float(x["volume"]) * float(x["close"])] for x in ((r or {}).get("data") or {}).get("ohlc") or []]
+        rows.sort()
+        return rows
+
+    def first_ms(self, symbol: str):
+        # 3-day candles asked from before Bitstamp opened (2011-08) start at the pair's first one. A 1-minute window
+        # that starts before the pair's first minute answers from that minute on (nothing when it ends before it),
+        # so walking 1-minute windows from this bucket's start misses nothing (checked 2026-11-12: BTC 2011-08-18 12:37)
+        rows = self._rows(_get(f"{self.API}/ohlc/{symbol}/?step=259200&limit=1000&start=1300000000"))
+        traded = [r for r in rows if r[5] > 0]
+        return traded[0][0] if traded else None
+
+    def fetch(self, symbol: str, start_ms: int, end_ms: int, stop=None) -> list:
+        # start is inclusive and the window runs `limit` minutes from it; with end too, start is ignored (checked 2026-11-12)
+        return self._rows(_get(f"{self.API}/ohlc/{symbol}/?step=60&limit={self.window}&start={int(start_ms) // 1000}", stop=stop))
+
+    def latest(self, symbol: str, n: int = 3) -> list:
+        return [r for r in self._rows(_get(f"{self.API}/ohlc/{symbol}/?step=60&limit={n}", timeout=10, attempts=1)) if r[5] > 0]
+
 
 # ---------------------------------------------------------------- Bybit, through bybit_sync, so a combined market treats it like the others
 
@@ -562,10 +666,10 @@ class Bybit(Venue):
         return X.kline(*X.parse(symbol), "1", limit=n, attempts=1, timeout=10)
 
 
-VENUES = {v.name: v for v in (Binance(), Bybit(), OKX(), Coinbase(), KuCoin(), Bitfinex())}
+VENUES = {v.name: v for v in (Binance(), Bybit(), OKX(), Coinbase(), Bitstamp(), KuCoin(), Bitfinex())}
 # whose prices decide a minute nobody traded in (the price itself is the dollar-weighted median of the venues that did)
-PRIORITY = ["binance", "bybit", "okx", "coinbase", "kucoin", "bitfinex"]
-DOWNLOAD_ORDER = ["binance", "bybit", "kucoin", "bitfinex", "coinbase", "okx"]
+PRIORITY = ["binance", "bybit", "okx", "coinbase", "bitstamp", "kucoin", "bitfinex"]
+DOWNLOAD_ORDER = ["binance", "bybit", "kucoin", "bitfinex", "coinbase", "bitstamp", "okx"]
 
 
 # ---------------------------------------------------------------- files
@@ -673,6 +777,7 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
             flush()
 
     holding = [False]                                            # a reverse tail walk is keeping its rows in memory
+    filled = [0]                                                 # hours without minutes filled from coarser candles
 
     def finish(result):
         if holding[0]:
@@ -682,23 +787,114 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
         if hasattr(venue, "forget"):
             venue.forget(symbol)
         out = {"result": result, "first": int(frame["ts"].iloc[0]) if len(frame) else None,
-               "last": int(frame["ts"].iloc[-1]) if len(frame) else None, "n": int(len(frame)), "prev_last": prev_last}
+               "last": int(frame["ts"].iloc[-1]) if len(frame) else None, "n": int(len(frame)), "prev_last": prev_last,
+               "filled": filled[0]}
         out["grew_back"] = prev_first is not None and out["first"] is not None and out["first"] < prev_first
         if len(frame):
             side["first"] = out["first"]
         save_side(venue.name, symbol, side)
         return out
 
+    def page(cursor, end):
+        """One forward request: (rows to store, the newest minute it answered for, or None)."""
+        rows = [r for r in venue.fetch(symbol, cursor, end, stop=stop) if cursor <= r[0] <= end]   # some venues pad the window
+        if not rows:
+            return [], None
+        return ([r for r in rows if r[5] > 0] if venue.drop_empty else rows), rows[-1][0]
+
+    def head(cursor, until):
+        """Forward from cursor to until (inclusive): history before the file's first candle that the first download
+        missed. Resumable: side["head_walk"] = [where it is, where it ends]. False = stopped."""
+        side["head_walk"] = [int(cursor), int(until)]
+        begin, span = cursor, max(1, until - cursor)
+        while cursor <= until:
+            if stop and stop():
+                return False
+            end = min(cursor + venue.window * MINUTE - 1, until)
+            rows, last = page(cursor, end)
+            cursor = last + MINUTE if last is not None else end + 1
+            side["head_walk"][0] = int(cursor)
+            if rows:
+                take(rows)
+            if progress:
+                progress(min(99.0, (cursor - begin) / span * 100), cursor)
+            time.sleep(venue.pause)
+        side.pop("head_walk", None)
+        return True
+
+    def fill_holes():
+        """Hours the venue traded in (its hourly candles) but serves no minutes for: its finest coarser candles
+        there, else the hour's candle. Each stretch of history is checked once (side["holes_to"]); the last day is
+        left for later, its minutes may still be arriving. A failure leaves the stretch for the next sync: the
+        series itself is complete without it."""
+        flush()
+        if not len(frame):
+            return
+        ts = frame["ts"].to_numpy(np.int64)
+        lo = int(side.get("holes_to") or ts[0] // HOUR * HOUR)
+        hi = (int(ts[-1]) - DAY) // HOUR * HOUR
+        if hi <= lo:
+            return
+        try:
+            hours = venue.coarse(symbol, 60, lo, hi - 1, stop=stop)
+            if stop and stop():
+                return
+            have = np.unique(ts // HOUR)
+            hrs = np.array([r[0] // HOUR for r in hours], np.int64)
+            miss = [r for r, held in zip(hours, np.isin(hrs, have)) if not held and r[5] > 0]
+            fine_tf = venue.coarse_tfs[0]
+            rows, i = [], 0
+            while i < len(miss):                                 # one fine request covers the missing hours of its window,
+                a = miss[i][0]                                   # which ends on an hour boundary (no hour half-filled)
+                b = min(max((a + venue.window * fine_tf * MINUTE) // HOUR * HOUR, a + HOUR) - 1, hi - 1)
+                fine = {}
+                if fine_tf < 60:
+                    for r in venue.coarse(symbol, fine_tf, a, b, stop=stop):
+                        fine.setdefault(r[0] // HOUR, []).append(r)
+                    if stop and stop():
+                        return
+                while i < len(miss) and miss[i][0] <= b:
+                    rows.extend(fine.get(miss[i][0] // HOUR) or [miss[i]])
+                    i += 1
+        except Exception:
+            return
+        if rows:
+            take(sorted(rows))
+            filled[0] += len(miss)
+        side["holes_to"] = hi
+        flush()
+
     def run():
         if not venue.reverse:
             if len(frame):
                 cursor = int(frame["ts"].iloc[-1])               # refetched: it may have been forming
                 first = int(frame["ts"].iloc[0])
+                if side.get("head_walk"):                        # a head walk that was stopped part-way
+                    if not head(*side["head_walk"]):
+                        return finish("stopped")
+                    side["head"] = HEAD_VERSION
+                elif venue.head_check and side.get("head") != HEAD_VERSION:
+                    sure = True
+                    try:
+                        deeper = venue.first_ms(symbol)
+                        sure = venue.first_is_sure(symbol)
+                    except LookupError:
+                        deeper = None
+                    except Exception:                            # the network: checked again next time, the tail goes on
+                        deeper, sure = None, False
+                    if deeper is not None and deeper < first:
+                        if not head(deeper, first - MINUTE):
+                            return finish("stopped")
+                        first = deeper
+                    if sure:
+                        side["head"] = HEAD_VERSION
             else:
                 first = venue.first_ms(symbol)
                 if first is None:
                     raise LookupError(f"{venue.title} has no candles for {symbol}")
                 cursor = first
+                if venue.first_is_sure(symbol):                  # else the head check looks again next time
+                    side["head"] = HEAD_VERSION
             side["first"] = first
             side["history_done"] = True                          # forward venues start at the first candle
             span = max(1, now_ms - first)
@@ -706,10 +902,10 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
                 if stop and stop():
                     return finish("stopped")
                 end = cursor + venue.window * MINUTE - 1
-                rows = [r for r in venue.fetch(symbol, cursor, end, stop=stop) if cursor <= r[0] <= end]   # some venues pad the window
-                if rows:
-                    take(rows)
-                    last = rows[-1][0]
+                rows, last = page(cursor, end)
+                if last is not None:
+                    if rows:
+                        take(rows)
                     if progress:
                         progress(min(100.0, (last - first) / span * 100), last)
                     if last >= now_ms - MINUTE:
@@ -720,6 +916,10 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
                         break
                     cursor = end + 1
                 time.sleep(venue.pause)
+            if venue.coarse_tfs:
+                fill_holes()
+                if stop and stop():
+                    return finish("stopped")
             out = finish("done")
             if out["n"] == 0:
                 raise LookupError(f"{venue.title} has no candles for {symbol}")
