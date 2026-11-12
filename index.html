@@ -17,6 +17,7 @@
   <label id="lTf" style="display:none">timeframe <select id="tf"></select></label>
   <i class="sep"></i>
   <span class="btns">
+    <button id="bInd" class="tb" title="Indicators: lines computed from the bars, switched on or off here"><svg viewBox="0 0 28 28"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 21.5c6.5-.5 9-3 11.5-8S20.5 6 23 5.5"/><path d="M5 24.5h18" stroke-dasharray="1.5 3"/></g></svg>Indicators</button>
     <button id="bUndo" class="tb icon" title="Undo (Ctrl+Z)" disabled><svg viewBox="0 0 28 28"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M9.5 9.5H17a5.5 5.5 0 0 1 0 11h-5M12.5 6 9 9.5l3.5 3.5"/></svg></button>
     <button id="bRedo" class="tb icon" title="Redo (Ctrl+Y)" disabled><svg viewBox="0 0 28 28"><path fill="none" stroke="currentColor" stroke-width="1.6" d="M18.5 9.5H11a5.5 5.5 0 0 0 0 11h5M15.5 6 19 9.5 15.5 13"/></svg></button>
     <button id="bSettings" class="tb icon" title="Chart settings"><svg viewBox="0 0 28 28"><g fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="14" cy="14" r="3.2"/><path d="M14 4.5l1.6 2.6 3-.6.9 2.9 2.8 1.2-.8 2.9 2 2.3-2.2 2 .6 3-2.9.8-1.3 2.8-2.9-.9L14 23.5l-1.8-2.5-2.9.9-1.3-2.8-2.9-.8.6-3-2.2-2 2-2.3-.8-2.9 2.8-1.2.9-2.9 3 .6z"/></g></svg></button>
@@ -40,7 +41,7 @@
   </nav>
   <div id="wrap">
     <div id="chart"></div>
-    <div id="legend">hover a bar</div>
+    <div id="legend"><div id="lgBar">hover a bar</div><div id="lgInd"></div></div>
     <div id="empty"></div>
     <div id="axis"><button id="bAuto" title="Auto scale (double-click the price axis does the same)">A</button><button id="bLog" title="Logarithmic price scale">L</button></div>
     <div id="banner"><span id="bannerText"></span><button id="bannerBtn">Update now</button></div>
@@ -54,6 +55,7 @@
 <script src="static/ui.js"></script>
 <script src="static/settings.js"></script>
 <script src="static/draw.js"></script>
+<script src="static/indicators.js"></script>
 <script src="static/window.js"></script>
 <script src="static/app.js"></script>
 <script>

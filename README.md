@@ -45,6 +45,11 @@ amount of market activity. TradingView does not draw them, so this does.
   and anchored by time and price, so they show on every bar size and time frame. Two app windows open at once
   show each other's changes and never overwrite each other; if a save fails (server restarting) the top bar
   says so in red and it is retried until it works.
+* **Indicators** (button in the top bar): lines computed from the bars, switched on or off from its menu and
+  remembered. For now one, on Bitcoin charts: the power law exactly as posted on Bitcointalk in February 2013
+  and never refitted, `price = 4.41877e-17 × (days since 2009-01-03) ^ 5.59807`. It depends on the date alone,
+  so it is the same curve on dollar bars and time bars; each bar gets the value at the moment it closed. The
+  legend shows the line's value and the bar's close as a multiple of it.
 * **Chart settings** (gear in the top bar): candle body, borders and wick on/off with up and down colors, and
   a solid or gradient background, all with opacity, in a TradingView-style color picker (its palette, your
   own custom colors, an opacity slider). Changes preview live; Cancel puts the chart back.
@@ -101,6 +106,7 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 | `index.html` | the page layout: top bar, drawing toolbar, chart |
 | `static/app.js` | loading and live-updating the chart, ticker picker, watchlist, stats, legend, update banner |
 | `static/draw.js` | the drawing tools (trend line), their toolbars and settings, undo/redo, saving |
+| `static/indicators.js` | the indicators (Bitcoin power law, 2013 formula), their menu and legend line |
 | `static/settings.js` | the chart settings dialog (candles, background) |
 | `static/window.js` | the app window's size and place, remembered between launches |
 | `static/ui.js`, `static/app.css` | color picker, menus, dialogs; the page's styles |

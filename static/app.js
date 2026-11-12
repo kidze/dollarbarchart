@@ -1,6 +1,6 @@
 /* The chart page: loads a market's bar sets from the local server, keeps the forming bar live, the ticker picker,
-   watchlist, stats line, hover legend, update banner, and wires the settings dialog (settings.js) and the drawing
-   tools (draw.js) to the chart. */
+   watchlist, stats line, hover legend, update banner, and wires the settings dialog (settings.js), the drawing
+   tools (draw.js) and the indicators (indicators.js) to the chart. */
 (function(){
   'use strict';
   var app = window.DBCApp = {};                                  // index.html checks this exists (all scripts arrived)
@@ -143,7 +143,7 @@
 
   // ---------------------------------------------------------------- chart
   var rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 14;     // the page's UI size, see html{font-size}
-  var chart, series, scale, settings, draw;
+  var chart, series, scale, settings, draw, ind;
 
   function makeChart(){
     chart = LC.createChart($('chart'), {
@@ -183,8 +183,9 @@
       var head = mode === 'dollar'
         ? '<b>' + fmtT(r.t) + ' → ' + fmtT(r.e) + '</b> · ' + (isForming ? 'forming, ' : 'took ') + '<b>' + fmtHrs((r.e - r.t)/3600) + '</b> (' + r.n + ' min) · ' + fmtD(r.d) + (isForming ? ' of ' + fmtD(capOf(r)) : adaptive(size) ? ' (size ' + fmtD(r.z) + ')' : '') + ' traded'
         : '<b>' + (tf === '1h' || tf === '4h' ? fmtT(r.t) : fmtDay(r.t)) + '</b> (' + tf + (isForming ? ', forming' : '') + ') · ' + fmtD(r.d) + ' traded';
-      $('legend').innerHTML = head + '<br>O ' + fmtP(r.o) + ' · H ' + fmtP(r.h) + ' · L ' + fmtP(r.l) +
+      $('lgBar').innerHTML = head + '<br>O ' + fmtP(r.o) + ' · H ' + fmtP(r.h) + ' · L ' + fmtP(r.l) +
         ' · C ' + fmtP(r.c) + ' · <span style="color:' + (chg >= 0 ? '#2ebd85' : '#f23645') + '">' + (chg > 0 ? '+' : '') + chg.toFixed(2) + '%</span>';
+      ind.hover(r);
     });
   }
 
@@ -197,6 +198,7 @@
   }
 
   function candle(r){ return {time:r.t, open:r.o, high:r.h, low:r.l, close:r.c}; }
+  function put(r){ series.update(candle(r)); ind.update(r); }      // one new or changed bar, to the candles and the indicators
   function precisionFor(px){ var p = px >= 1000 ? 0 : px >= 10 ? 2 : px >= 0.1 ? 4 : px >= 0.001 ? 6 : px >= 1e-5 ? 8 : px >= 1e-7 ? 10 : 12; series.applyOptions({priceFormat:{type:'price',precision:p,minMove:Math.pow(10,-p)}}); }
   function setStatus(m, note){
     var s = $('status'); s.className = m.sync === 'live' ? 'live' : (m.sync === 'backfilling' || m.sync === 'loading' || m.sync === 'queued') ? 'busy' : '';
@@ -252,13 +254,14 @@
       (busy ? ' · busiest month <b>' + busy + '</b> ' + months[busy] + ' bars, quietest <b>' + quiet + '</b> ' + months[quiet] : '') +
       ' · last 365 days <b>' + last365 + '</b>' + (forming ? ' · forming: ' + (mode === 'dollar' ? fmtD(forming.d) + ' of ' + fmtD(capOf(forming)) + ' (' + Math.round(forming.d/capOf(forming)*100) + '%)' : 'open since ' + fmtT(forming.t)) : '');
   }
+  function rows(){ return forming ? bars.concat([forming]) : bars; }   // the bars on the chart, oldest first
   function render(reset){
     byTime = {}; bars.forEach(function(b){ byTime[b.t] = b; });
     var data = bars.map(candle);
     if (forming) { byTime[forming.t] = forming; data.push(candle(forming)); }
     if (data.length) precisionFor(data[data.length-1].close);
     seq++;
-    series.setData(data); fitLimit();
+    ind.reset(); series.setData(data); ind.render(rows()); fitLimit();
     if (reset) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0, data.length - 260), to:data.length + 4}); scale.applyOptions({autoScale:true}); }
     stats(); settings.priceLine(); draw.refresh();
   }
@@ -313,13 +316,13 @@
       var before = bars.length + (forming ? 1 : 0), formingT = forming && forming.t;
       if (k.n === bars.length + 1) {
         if (bars.length && k.tail.length > 1 && !sameBar(k.tail[0], bars[bars.length-1])) return load(false);   // the previous bar was re-cut while we were not looking
-        var b = k.tail[k.tail.length-1]; bars.push(b); byTime[b.t] = b; series.update(candle(b));
+        var b = k.tail[k.tail.length-1]; bars.push(b); byTime[b.t] = b; put(b);
       }
       else if (k.n === bars.length && k.n && !sameBar(k.tail[k.tail.length-1], bars[k.n-1])) {   // last bar re-cut with its fuller final minute
-        var r = k.tail[k.tail.length-1]; bars[k.n-1] = r; byTime[r.t] = r; series.update(candle(r));
+        var r = k.tail[k.tail.length-1]; bars[k.n-1] = r; byTime[r.t] = r; put(r);
       }
       forming = k.forming;
-      if (forming) { byTime[forming.t] = forming; series.update(candle(forming)); }
+      if (forming) { byTime[forming.t] = forming; put(forming); }
       if (bars.length + (forming ? 1 : 0) !== before || (forming && forming.t) !== formingT) { seq++; draw.refresh(); }
       fitLimit(); stats(); settings.priceLine();
     }).catch(function(){ if (!restarting) setStatus({sync:'server not answering'}); });
@@ -359,7 +362,7 @@
     if (k === market) return;
     market = k; size = sizes[market] || null; bars = []; forming = null; meta = null; seq++;
     history.replaceState(null, '', '#' + market);
-    series.setData([]); $('stats').textContent = ''; $('legend').textContent = 'hover a bar';
+    ind.clear(); series.setData([]); $('stats').textContent = ''; $('lgBar').textContent = 'hover a bar';
     $('tName').textContent = k.split(':')[1]; $('tSub').textContent = 'loading…';
     draw.setMarket(market);
     save(); load(true);
@@ -439,9 +442,10 @@
     $('tf').onchange = function(){ tf = this.value; this.blur(); save(); load(true); };
     if (mode === 'time') { $('bDollar').className = ''; $('bTime').className = 'on'; $('lSize').style.display = 'none'; $('lTf').style.display = ''; }
     $('bSettings').onclick = function(){ settings.open(); };
+    $('bInd').onclick = function(){ ind.menu(this); };
   }
 
-  // what settings.js and draw.js see of the page
+  // what settings.js, draw.js and indicators.js see of the page
   app.store = store;
   app.post = post;
   app.saveState = saveState;
@@ -449,7 +453,9 @@
   app.timeToLogical = timeToLogical;
   app.logicalToTime = logicalToTime;
   app.barCount = function(){ return bars.length + (forming ? 1 : 0); };
+  app.rows = rows;
   app.market = function(){ return market; };
+  app.marketInfo = function(){ return meta && meta.market; };
   app.fmtP = fmtP; app.fmtT = fmtT; app.fmtHrs = fmtHrs;
   app.mode = function(){ return mode; };
 
@@ -459,6 +465,7 @@
     app.chart = chart; app.series = series;
     settings = app.settings = DBCSettings(app);
     draw = app.draw = DBCDraw(app);
+    ind = app.ind = DBCIndicators(app);
     wire();
     history.replaceState(null, '', '#' + market);
     draw.setMarket(market);
