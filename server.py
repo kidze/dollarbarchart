@@ -664,11 +664,12 @@ def merged_frame(m: Market) -> pd.DataFrame:
     m.weights = {lab: float(f["turnover"].to_numpy(float)[f["ts"].to_numpy(np.int64) > int(f["ts"].iloc[-1]) - C.DAY].clip(min=0).sum())
                  for lab, f in zip(labels, frames)}
     cp, cj = cache_paths(ticker)
-    base, cut = None, None
+    base, cut, written = None, None, None
     try:
         side = json.loads(cj.read_text(encoding="utf-8")) if cj.exists() else None
         if side and side.get("method") == C.METHOD and sorted(side["parts"]) == sorted(labels):
             cut = int(side["last"])
+            written = int(side.get("written", cut))              # (the day it was written: "last" may be older, a market whose data stopped)
             if all(side["parts"][lab] == [int(f["ts"].iloc[0]), int(np.searchsorted(f["ts"].to_numpy(np.int64), cut))]
                    for lab, f in zip(labels, frames)):
                 base = pd.read_parquet(cp)
@@ -683,7 +684,7 @@ def merged_frame(m: Market) -> pd.DataFrame:
         merged, fixed = C.despike(merged, frames, start=len(base))
         if fixed:
             log(f"{m.key}: {fixed} off-price minutes no other exchange confirms repaired")
-        if not (complete and today - cut >= CACHE_REFRESH_DAYS * C.DAY):
+        if not (complete and today - written >= CACHE_REFRESH_DAYS * C.DAY):
             return merged
     else:
         merged, fixed = C.despike(C.merge(frames), frames)
@@ -696,7 +697,7 @@ def merged_frame(m: Market) -> pd.DataFrame:
             head = merged[merged["ts"] < cut]
             X.write_durably(cp, lambda fh: head.to_parquet(fh, index=False))
             fp = {lab: [int(f["ts"].iloc[0]), int(np.searchsorted(f["ts"].to_numpy(np.int64), cut))] for lab, f in zip(labels, frames)}
-            X.write_durably(cj, lambda fh: fh.write(json.dumps({"method": C.METHOD, "last": cut, "parts": fp}).encode()))
+            X.write_durably(cj, lambda fh: fh.write(json.dumps({"method": C.METHOD, "last": cut, "written": today, "parts": fp}).encode()))
         except Exception as e:
             log(f"{m.key}: merge cache not written: {type(e).__name__}: {e}")
     return merged

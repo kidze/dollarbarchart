@@ -85,6 +85,7 @@ def test_a_long_download_merges_partial_series_and_keeps_the_newest_minutes():
         import json, combined as C
         side = json.loads(S.cache_paths("TESTCOMB")[1].read_text(encoding="utf-8"))   # the merge cache never holds the
         assert side["last"] <= int(m.cd.ts[m.cd.n - 1]) - C.LONE_SPAN * M   # newest minutes the lone rule has not checked
+        assert side["written"] == int(time.time() * 1000) // C.DAY * C.DAY   # the weekly refresh counts from this day
     finally:
         X.DATA, V.DATA, V.time, V.FLUSH_REQUESTS, S.REBUILD_S, S.plan_all, S.price_check, venues, S.STATE["index"] = saved
         V.VENUES.clear()
