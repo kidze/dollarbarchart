@@ -48,8 +48,13 @@ amount of market activity. TradingView does not draw them, so this does.
 * **Indicators** (button in the top bar): lines computed from the bars, switched on or off from its menu and
   remembered. For now one, on Bitcoin charts: the power law exactly as posted on Bitcointalk in February 2013
   and never refitted, `price = 4.41877e-17 × (days since 2009-01-03) ^ 5.59807`. It depends on the date alone,
-  so it is the same curve on dollar bars and time bars; each bar gets the value at the moment it closed. The
-  legend shows the line's value and the bar's close as a multiple of it.
+  so it is the same curve on dollar bars and time bars; each bar gets the value at the moment it closed. With
+  it come thinner lines at its multiples where every past cycle bottomed (0.54× Aug 2015, 0.82× Feb 2019,
+  0.68× Mar 2020, 0.65× Nov 2022, 0.66× Jun 2026) and topped (15.7× Nov 2013, 9.4× Dec 2017, 5.2× Mar 2021,
+  2.0× Dec 2024; dashed): the daily close as a multiple of the line on the day that multiple was lowest or
+  highest. Each is named on the price axis with its level where it leaves the chart. The legend shows the
+  line's value, the bar's close as a multiple of it, and the two levels that multiple sits between. Auto
+  scale makes room for the line and the lows, not for the tops.
 * **Chart settings** (gear in the top bar): candle body, borders and wick on/off with up and down colors, and
   a solid or gradient background, all with opacity, in a TradingView-style color picker (its palette, your
   own custom colors, an opacity slider). Changes preview live; Cancel puts the chart back.
