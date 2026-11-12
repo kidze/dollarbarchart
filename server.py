@@ -690,7 +690,8 @@ def merged_frame(m: Market) -> pd.DataFrame:
         if fixed:
             log(f"{m.key}: {fixed} off-price minutes no other exchange confirms repaired")
     if complete:
-        cut = today                                              # complete days only: today keeps changing
+        cut = min(today, int(merged["ts"].iloc[-1]) - C.LONE_SPAN * C.MINUTE) if len(merged) else today   # complete days only (today keeps
+                                                                 # changing), and not the minutes lone_bands() has not checked yet
         try:
             head = merged[merged["ts"] < cut]
             X.write_durably(cp, lambda fh: head.to_parquet(fh, index=False))

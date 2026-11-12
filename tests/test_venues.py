@@ -769,6 +769,54 @@ def test_a_lone_minute_of_a_bigger_or_similar_exchange_or_with_nobody_around_is_
     out, fixed = C.despike(merged, [big, mid, thin])
     assert fixed == 0 and out.equals(merged)
 
+
+def test_the_lone_rule_holds_to_the_bigger_exchange_only_and_skips_a_missing_price():
+    """(the review's cases) A third, small exchange's wild print near the minute does not widen the band, and a
+    missing (NaN) price of the bigger exchange there does not switch the rule off."""
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=33)
+    thin = series(T0, n, dollars=1e3, seed=33)
+    tiny = series(T0, n, dollars=5e2, seed=33)
+    big = big[big["ts"] != T0 + 2000 * M].reset_index(drop=True)
+    tiny = tiny[tiny["ts"] != T0 + 2000 * M].reset_index(drop=True)
+    thin.loc[2000, ["open", "high", "low", "close"]] = thin.loc[2000, "close"] * 0.73
+    tiny.loc[tiny["ts"] == T0 + 1999 * M, "low"] = 1.0              # tiny's own bad print, a minute before
+    big.loc[big["ts"] == T0 + 1998 * M, "low"] = np.nan
+    merged = C.merge([big, thin, tiny])
+    out, fixed = C.despike(merged, [big, thin, tiny])
+    row = lambda df, k: df[df["ts"] == T0 + k * M].iloc[0]
+    assert row(out, 2000)["low"] == row(merged, 1999)["close"]
+
+
+def test_a_move_the_smaller_exchange_trades_first_is_not_held_back():
+    """(the review's case) The bigger exchange is silent for 10 minutes while the smaller one trades a real 8% step:
+    nothing holds the step back (the bigger one did not trade after it within the span)."""
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=34)
+    thin = series(T0, n, dollars=1e3, seed=34)
+    for f in (big, thin):
+        f.loc[f.index >= 2000, ["open", "high", "low", "close"]] *= 0.92
+    big = big[~big["ts"].between(T0 + 2000 * M, T0 + 2009 * M)].reset_index(drop=True)
+    merged = C.merge([big, thin])
+    out, fixed = C.despike(merged, [big, thin])
+    assert fixed == 0 and out.equals(merged)
+
+
+def test_the_lone_rule_from_a_start_row_matches_the_full_run():
+    """The merge cache's incremental call (start = rows already checked) gives the same rows as the full run."""
+    n = 4000
+    big = series(T0, n, dollars=1e6, seed=35)
+    thin = series(T0, n, dollars=1e3, seed=35)
+    big = big.drop(index=[2000, 3000]).reset_index(drop=True)
+    thin.loc[2000, "low"] = thin.loc[2000, "close"] * 0.8
+    thin.loc[3000, "high"] = thin.loc[3000, "close"] * 1.2
+    merged = C.merge([big, thin])
+    full, fixed = C.despike(merged, [big, thin])
+    assert fixed == 2
+    for start in (1000, 2500, 2999):
+        part, _ = C.despike(merged, [big, thin], start=start)
+        assert part.iloc[start:].equals(full.iloc[start:]) and part.iloc[:start].equals(merged.iloc[:start])
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

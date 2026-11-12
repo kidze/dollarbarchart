@@ -10,9 +10,9 @@ merge (ten series of several million rows) takes seconds and bounded memory.
 despike() repairs the merged prices no second exchange confirms: a minute whose price is SPIKE times away from
 the median close of the minutes before it and of those after it, shown by only one exchange (the only one trading then, like Bitfinex's
 BTC trades at $0.01 in April 2013, or one holding most of the say). Market-wide moves, which every exchange
-shows, are kept. A minute only one exchange traded, while a bigger exchange (more say) traded within LONE_SPAN
-minutes of it, is held closer: LONE_BAND beyond the other exchanges' lowest low and highest high around it
-(Kraken's thin 2014 BTC/USD book printed $295 while the market was at $400).
+shows, are kept. A minute only one exchange traded, while one with LONE_RATIO times its say traded within LONE_SPAN
+minutes before and after it, is held closer: LONE_BAND beyond that exchange's lowest low and highest high
+around it (Kraken's thin 2014 BTC/USD book printed $295 while the market was at $400).
 
 trust() decides how much of a venue's history belongs to the coin the app means by a ticker: an exchange
 can reuse a ticker for another coin, or relist one after a long break.
@@ -144,62 +144,74 @@ def spike_refs(close: np.ndarray) -> tuple:
 
 
 def lone_bands(ts: np.ndarray, frames: list, start: int = 0, weights=None) -> tuple:
-    """(low, high) limits for the merged minutes ts[start:] that a single exchange traded while one with more say
-    (LONE_RATIO times its dollars over the day before, or weights) traded within LONE_SPAN minutes: the other
-    exchanges' lowest low and highest high in that span, LONE_BAND wider. NaN elsewhere; for the newest LONE_SPAN
-    minutes (the minutes after them have not arrived yet: they are checked when the merge is redone); and, without
-    weights, where either exchange has less than a day behind it (no say to compare yet: ZEC's launch week)."""
+    """(low, high) limits for the merged minutes ts[start:] that a single exchange traded while an exchange with
+    LONE_RATIO times its say (its dollars over the day before, or weights) traded within LONE_SPAN minutes before
+    AND after it: those bigger exchanges' lowest low and highest high in that span, LONE_BAND wider. NaN elsewhere:
+    the newest LONE_SPAN minutes (the minutes after them have not arrived yet: the merge cache leaves them out, so
+    they are checked when the merge is redone); and, without weights, where either exchange has less than a day of
+    history (no say to compare yet: ZEC's launch week). A bigger exchange silent on one side (a move the smaller
+    one traded first) holds nothing. Reads each frame from a day before ts[start] only, one at a time."""
     t = ts[start:]
     m = len(t)
     lo_b, hi_b = np.full(m, np.nan), np.full(m, np.nan)
     if not m or len(frames) < 2:
         return lo_b, hi_b
-    cnt, who, tr = np.zeros(m, np.int32), np.full(m, -1, np.int32), []
-    for j, f in enumerate(frames):
-        sd = f["turnover"].to_numpy(float)
+    span = LONE_SPAN * MINUTE
+    since = int(t[0]) - WEIGHT_SPAN - span
+
+    def rows(f: pd.DataFrame) -> tuple:
+        """(ts, high, low, dollars) of f's traded minutes from `since` on."""
+        fts = f["ts"].to_numpy(np.int64)
+        i = int(np.searchsorted(fts, since))
+        sts, hi, lo, sd = fts[i:], f["high"].to_numpy(float)[i:], f["low"].to_numpy(float)[i:], f["turnover"].to_numpy(float)[i:]
         ok = sd > 0
-        sts = f["ts"].to_numpy(np.int64)[ok]
-        tr.append((sts, f["high"].to_numpy(float)[ok], f["low"].to_numpy(float)[ok], np.concatenate([[0.0], np.cumsum(sd[ok])])))
+        return (sts, hi, lo, sd) if ok.all() else (sts[ok], hi[ok], lo[ok], sd[ok])
+
+    cnt, who = np.zeros(m, np.int32), np.full(m, -1, np.int32)
+    for j, f in enumerate(frames):
+        sts = rows(f)[0]
         k = np.searchsorted(t, sts)
         hit = k < m
         hit[hit] = t[k[hit]] == sts[hit]
         cnt[k[hit]] += 1
         who[k[hit]] = j
-    lone = np.flatnonzero((cnt == 1) & (t <= ts[-1] - LONE_SPAN * MINUTE))
+    lone = np.flatnonzero((cnt == 1) & (t <= ts[-1] - span))
     if not len(lone):
         return lo_b, hi_b
     tl, wl = t[lone], who[lone]
 
-    def say(j: int, at: np.ndarray) -> np.ndarray:
-        """Its dollars over the day before; NaN while it has less than a day behind it."""
+    def say(j: int, f: pd.DataFrame, sts: np.ndarray, sd: np.ndarray, at: np.ndarray) -> np.ndarray:
+        """Its dollars over the day before each of `at`; NaN while it has less than a day of history."""
         if weights is not None:
             return np.full(len(at), float(weights[j]))
-        sts, cum = tr[j][0], tr[j][3]
-        if not len(sts):
+        if not len(f):
             return np.full(len(at), np.nan)
+        cum = np.concatenate([[0.0], np.cumsum(sd)])
         out = cum[np.searchsorted(sts, at)] - cum[np.searchsorted(sts, at - WEIGHT_SPAN)]
-        return np.where(at - WEIGHT_SPAN >= sts[0], out, np.nan)
+        return np.where(at - WEIGHT_SPAN >= int(f["ts"].iloc[0]), out, np.nan)
 
-    own = np.zeros(len(lone))
-    for j in range(len(frames)):
+    own = np.full(len(lone), np.nan)
+    for j, f in enumerate(frames):
         sel = wl == j
         if sel.any():
-            own[sel] = say(j, tl[sel])
-    o_lo, o_hi, bigger = np.full(len(lone), np.inf), np.full(len(lone), -np.inf), np.zeros(len(lone), bool)
-    for j, (sts, hi, lo, _) in enumerate(tr):
-        a = np.searchsorted(sts, tl - LONE_SPAN * MINUTE)
-        b = np.searchsorted(sts, tl + LONE_SPAN * MINUTE, side="right")
-        near = (b > a) & (wl != j)
+            sts, _, _, sd = rows(f)
+            own[sel] = say(j, f, sts, sd, tl[sel])
+    o_lo, o_hi = np.full(len(lone), np.nan), np.full(len(lone), np.nan)
+    for j, f in enumerate(frames):
+        sts, hi, lo, sd = rows(f)
+        a = np.searchsorted(sts, tl - span)
+        mid = np.searchsorted(sts, tl)                           # (it has no row at a lone minute it did not trade)
+        b = np.searchsorted(sts, tl + span, side="right")
+        with np.errstate(invalid="ignore"):                      # (NaN say on either side: not bigger)
+            near = (mid > a) & (b > mid) & (wl != j) & (say(j, f, sts, sd, tl) > own * LONE_RATIO)
         if not near.any():
             continue
         for o in range(int((b - a)[near].max())):
             idx = a + o
             v = near & (idx < b)
-            o_lo[v] = np.minimum(o_lo[v], lo[idx[v]])
-            o_hi[v] = np.maximum(o_hi[v], hi[idx[v]])
-        with np.errstate(invalid="ignore"):
-            bigger |= near & (say(j, tl) > own * LONE_RATIO)          # (NaN on either side: not bigger)
-    use = bigger & np.isfinite(o_lo) & np.isfinite(o_hi)
+            o_lo[v] = np.fmin(o_lo[v], lo[idx[v]])               # (fmin/fmax: a NaN price is skipped)
+            o_hi[v] = np.fmax(o_hi[v], hi[idx[v]])
+    use = np.isfinite(o_lo) & np.isfinite(o_hi)
     lo_b[lone[use]] = o_lo[use] * (1 - LONE_BAND)
     hi_b[lone[use]] = o_hi[use] * (1 + LONE_BAND)
     return lo_b, hi_b
@@ -214,7 +226,8 @@ def despike(merged: pd.DataFrame, frames: list, start: int = 0, ref=None, weight
     A price is a bad print when it is SPIKE times below (above) the minutes before it AND the minutes after it: a
     step to a new price level (sparse early history, a listing) is near one side and stays. It stands anyway when
     CONFIRM exchanges that traded within a minute of it went that far the same way (a crash every exchange shows).
-    A minute only one exchange traded is held to lone_bands() where a bigger exchange traded around it.
+    A minute only one exchange traded is held to lone_bands() where a much bigger exchange traded around it; no
+    confirmation by smaller exchanges keeps it there (the bigger one's range is the evidence).
     Otherwise it takes the dollar-weighted median of the exchanges whose price there is not a bad print, and when
     there is none (the only exchange trading then): the open becomes the previous close, the close the open, and
     the high and low the candle's body."""
@@ -234,7 +247,8 @@ def despike(merged: pd.DataFrame, frames: list, start: int = 0, ref=None, weight
         high_b = np.fmax(back, fwd) * SPIKE
         center = np.where(np.isnan(back), fwd, back)
         l_lo, l_hi = lone_bands(ts, frames, start, weights)
-        low_b, high_b = np.fmax(low_b, l_lo), np.fmin(high_b, l_hi)   # (fmax/fmin skip the NaN of the other)
+        held = np.isfinite(l_lo)                                 # a bigger exchange's range says what the price was there:
+        low_b, high_b = np.fmax(low_b, l_lo), np.fmin(high_b, l_hi)   # smaller ones cannot confirm (fmax/fmin skip NaN)
         center = np.where(center < low_b, low_b, np.where(center > high_b, high_b, center))
         seg = px[start:]
         bad = (seg < low_b[:, None]) | (seg > high_b[:, None])
@@ -278,7 +292,7 @@ def despike(merged: pd.DataFrame, frames: list, start: int = 0, ref=None, weight
                     vals.append(spx[k, c])
                     ws.append(say(j, t))
                     own.append(sd[k])
-            if confirm >= CONFIRM:
+            if confirm >= CONFIRM and not held[r]:
                 continue
             if vals:
                 w = np.asarray(ws)
