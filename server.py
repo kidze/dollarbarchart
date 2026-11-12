@@ -155,6 +155,19 @@ def build_tag(b: dict) -> str:
     return f"{max((v[0] for v in b.values()), default=0)}-{sum(v[1] for v in b.values())}"
 
 
+def page_tag() -> tuple:
+    """(tag of the page's files on disk now, newest of their modification times)."""
+    page = {f: v for f, v in build_id().items() if not f.endswith(".py")}
+    return build_tag(page), max((v[0] for v in page.values()), default=0)
+
+
+def page_stale(pb) -> bool:
+    """The asking window was served other page files than the ones on disk (an update arrived while it stayed open, or
+    the server was restarted without the window reloading). Only once the files have been quiet for QUIET_S."""
+    tag, newest = page_tag()
+    return pb != tag and time.time() - newest >= QUIET_S
+
+
 def check_update() -> None:
     """Offer an update only once the files have been stable for QUIET_S, so a half-written set of files
     (an edit in progress, a checkout half done) is never handed to a restart."""
@@ -704,8 +717,12 @@ def sync_part(m: Market, s: dict, stop) -> None:
         s["pct"] = round(pct, 1)
         s["at"] = int(at // 1000)
 
+    def flushed():                                               # rows on disk: the next periodic merge takes them in
+        s["grew"] = True
+
     try:
-        res = V.sync(V.VENUES[s["venue"]], s["symbol"], progress=progress, stop=stop, list_ms=s.get("list_ms") or 0)
+        res = V.sync(V.VENUES[s["venue"]], s["symbol"], progress=progress, stop=stop, checkpoint=flushed,
+                     list_ms=s.get("list_ms") or 0)
     except LookupError as e:
         s["status"] = f"absent: {e}"[:160]
         log(f"{m.key}: {s['label']} left out: {e}")
@@ -718,6 +735,22 @@ def sync_part(m: Market, s: dict, stop) -> None:
     s["n"], s["first"], s["pct"] = res["n"], res["first"], 100.0
     s["grew"] = s.get("grew") or res["grew_back"] or res["prev_last"] is None
     s["status"] = "paused" if res["result"] == "stopped" else "done"
+
+
+def refresh_tail(m: Market, s: dict, stop) -> None:
+    """A done series' newest minutes onto its file while the market's other series are still downloading (its
+    status stays "done"; a failure is left for the next round)."""
+    if s["venue"] == "bybit":                                    # the plain Bybit market of the same key shares the file
+        plain = STATE["markets"].get(s["symbol"])
+        if plain is not None and plain.cd is not None:
+            if on_screen(plain):
+                persist(plain)
+                return
+            unload(plain)
+    try:
+        V.sync(V.VENUES[s["venue"]], s["symbol"], stop=stop)
+    except Exception as e:
+        log(f"{m.key}: {s['label']} catching up failed: {type(e).__name__}: {e}")
 
 
 def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> None:
@@ -763,6 +796,8 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
             continue
         s["status"] = "queued"
         groups.setdefault(s["venue"], []).append(s)
+    for g in groups.values():                                    # the perp first: it usually trades the most
+        g.sort(key=lambda s: s["kind"] != "perp")
     if only_failed and not groups:
         m.sync = "live"
         m.resync_at = time.time() + REPLAN_S if m.replan else 0.0
@@ -787,9 +822,16 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
                 m.updated = time.time()
             if not pending:
                 break
-            if build and any(s.get("grew") for s in live) and (time.time() - m.built_at > REBUILD_S or
-                                                               (m.sets is None and any(s["status"] == "done" and s.get("n") for s in live))):
-                rebuild_all(m)                                   # (an empty chart shows as soon as the first exchange is in)
+            done = [s for s in live if s["status"] == "done" and s.get("n")]
+            if not build or not (done or any(s.get("grew") for s in live)):
+                continue
+            if m.sets is None and done:
+                rebuild_all(m)                                   # an empty chart shows as soon as the first exchange is in
+            elif time.time() - m.built_at > REBUILD_S and not stop():
+                for s in done:                                   # their files end where they finished: catch them up first
+                    if not stop():
+                        refresh_tail(m, s, stop)
+                rebuild_all(m)                                   # the series still downloading join with what they have
         for f in futs:
             f.result()
     failed = [s for s in m.venues if s["status"].startswith("failed")]
@@ -962,7 +1004,22 @@ def live_loop() -> None:
         time.sleep(POLL_S)
         now = time.time()
         for m in list(STATE["markets"].values()):
-            if m.sync != "live" or m.cd is None or not on_screen(m, now) or not m.cd.n:
+            downloading = m.combined and m.sync == "backfilling" and m.sets is not None   # a long download: the newest
+            if (m.sync != "live" and not downloading) or m.cd is None or not on_screen(m, now) or not m.cd.n:   # minutes stay live
+                continue
+            if downloading:
+                try:
+                    rows, err = live_rows_all(m)
+                    if rows:
+                        with LOCK:
+                            if m.sets is not None and m.cd is not None:
+                                m.cd.upsert(rows)
+                                B.update_all(m.sets, m.cd)
+                                m.meta["last"] = int(m.cd.ts[m.cd.n - 1] // 1000)
+                                m.meta["n_candles"] = int(m.cd.n)
+                                m.updated = time.time()
+                except Exception as e:
+                    m.live_err = type(e).__name__
                 continue
             if m.combined and m.resync_at and now > m.resync_at:  # an exchange failed last time: the worker tries it again
                 m.resync_at = 0.0
@@ -1047,13 +1104,20 @@ class H(http.server.BaseHTTPRequestHandler):
     def js(self, obj, code=200):
         return self.send(code, json.dumps(obj, separators=(",", ":")).encode())
 
+    def meta(self, m, q) -> dict:
+        out = meta_of(m)
+        if not out["update"] and page_stale(q.get("pb", [None])[0]):
+            out["update"] = {"kind": "reload", "files": ["the page"], "stale": True}
+        return out
+
     def do_GET(self):
         STATE["last_req"] = time.time()
         u = urlparse(self.path)
         p, q = u.path, parse_qs(u.query)
         try:
             if p == "/":
-                body = (HERE / "index.html").read_bytes()
+                body = (HERE / "index.html").read_bytes().replace(
+                    b'<meta name="dbc-build" content="">', f'<meta name="dbc-build" content="{page_tag()[0]}">'.encode())
                 page_served()
                 return self.send(200, body, "text/html")
             if p == "/lightweight-charts.js":
@@ -1081,12 +1145,12 @@ class H(http.server.BaseHTTPRequestHandler):
                         want = B.size_key(B.nearest_size(m.meta["sizes"], want[2:], m.meta["auto_size"]))
                     sets = ({want: m.sets[want]} if want in m.sets else m.sets) if m.sets else {}
                     keys = {k: {"bars": v["bars"], "forming": v["forming"]} for k, v in sets.items()}
-                    return self.js({"meta": meta_of(m), "keys": keys})
+                    return self.js({"meta": self.meta(m, q), "keys": keys})
             if p == "/live":
                 m = touch(q.get("m", [DEFAULT_MARKET])[0])
                 with LOCK:
                     keys = {k: {"n": len(v["bars"]), "tail": v["bars"][-2:], "forming": v["forming"]} for k, v in m.sets.items()} if m.sets else {}
-                    return self.js({"meta": meta_of(m), "keys": keys})
+                    return self.js({"meta": self.meta(m, q), "keys": keys})
             if p == "/search":
                 return self.js(self.search(q.get("q", [""])[0]))
             if p == "/pick":

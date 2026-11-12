@@ -8,6 +8,7 @@
   var TF_S = {'1h':3600, '4h':14400, '1D':86400, '1W':604800};
   var $ = UI.$, esc = UI.esc;
 
+  var PB = (document.querySelector('meta[name="dbc-build"]') || {}).content || '';   // the page build this window was served
   var P = {}, LS = false; try { P = JSON.parse(localStorage.getItem('dollarbars') || '{}'); LS = true; } catch (e) {}
   var market = (location.hash || '').slice(1) || P.market || 'all:BTC';
   var toCombined = LS && !P.combined, toTries = 0, settled = !toCombined;   // once: a Bybit-only chart saved by an older version opens as its combined chart
@@ -219,7 +220,7 @@
       all++;
       if (v.status === 'done') done++; else if (v.status === 'syncing') cur.push(v.label + (v.pct != null ? ' ' + Math.round(v.pct) + '%' : ''));
     });
-    return (cur.length ? 'downloading ' + cur.join(', ') : 'catching up') + ' · ' + done + ' of ' + all + ' series done · the chart grows as they arrive';
+    return (cur.length ? 'downloading ' + cur.join(', ') : 'catching up') + ' · ' + done + ' of ' + all + ' series done · newest minutes live, the rest merged in every 5 min';
   }
   function setTicker(info){
     if (!info) return;
@@ -266,7 +267,7 @@
     if (loading) return Promise.resolve();
     loading = true;
     var mk = market, kk = key(), moved = false;
-    return fetch('/bars?m=' + encodeURIComponent(mk) + '&k=' + encodeURIComponent(kk)).then(function(r){ return r.json(); }).then(function(j){
+    return fetch('/bars?m=' + encodeURIComponent(mk) + '&k=' + encodeURIComponent(kk) + '&pb=' + encodeURIComponent(PB)).then(function(r){ return r.json(); }).then(function(j){
       if (mk !== market) return;                                            // the user moved on while this was in flight
       if (kk !== key()) { moved = true; return; }                           // a menu change meanwhile: this answer holds the old set only
       if (j.error) { setStatus({sync:'error'}, j.error); $('empty').textContent = j.error; $('empty').className = 'show'; return; }
@@ -301,7 +302,7 @@
   function poll(){
     if (restarting) return;
     var kk = key(), mk = market;
-    fetch('/live?m=' + encodeURIComponent(mk)).then(function(r){ return r.json(); }).then(function(j){
+    fetch('/live?m=' + encodeURIComponent(mk) + '&pb=' + encodeURIComponent(PB)).then(function(r){ return r.json(); }).then(function(j){
       if (restarting || mk !== market || j.error) return;
       setStatus(j.meta); setTicker(j.meta.market); checkUpdate(j.meta);
       if (kk !== key() || loading) return;                                   // a menu change is in flight: its load() will redraw
@@ -369,7 +370,8 @@
     if (restarting) return;
     if (!m || !m.update) { if (update) { update = null; $('banner').className = ''; draw.refresh(); } return; }
     update = m.update;
-    $('bannerText').textContent = update.kind === 'reload'
+    $('bannerText').textContent = update.stale ? 'This window shows an older version of the chart: reload to update (instant)'
+      : update.kind === 'reload'
       ? 'Update available: ' + update.files.join(', ') + ' changed (page reload, instant)'
       : 'Update available: ' + update.files.join(', ') + ' changed (server restart, about 10 s)';
     if ($('banner').className !== 'show') { $('banner').className = 'show'; draw.refresh(); }   // the drawing toolbar moves out of its way
