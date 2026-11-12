@@ -629,13 +629,22 @@ class Bitstamp(Venue):
         rows.sort()
         return rows
 
+    OPENED_S = 1_300_000_000                                     # 2011-03, before Bitstamp opened (2011-08)
+    BUCKET_S = 259_200                                           # 3-day candles: one request spans 1000 of them (8.2 years)
+
     def first_ms(self, symbol: str):
-        # 3-day candles asked from before Bitstamp opened (2011-08) start at the pair's first one. A 1-minute window
-        # that starts before the pair's first minute answers from that minute on (nothing when it ends before it),
-        # so walking 1-minute windows from this bucket's start misses nothing (checked 2026-11-12: BTC 2011-08-18 12:37)
-        rows = self._rows(_get(f"{self.API}/ohlc/{symbol}/?step=259200&limit=1000&start=1300000000"))
-        traded = [r for r in rows if r[5] > 0]
-        return traded[0][0] if traded else None
+        # 3-day candles from `start` begin at the pair's first one; a pair listed more than 1000 buckets later
+        # answers nothing there (SOL 2022-08, HYPE 2025-11: checked 2026-11-12), so the next 1000 are asked. A
+        # 1-minute window that starts before the pair's first minute answers from that minute on (nothing when it
+        # ends before it), so walking 1-minute windows from this bucket's start misses nothing (BTC 2011-08-18 12:37)
+        start, now = self.OPENED_S, int(time.time())
+        while start < now:
+            rows = self._rows(_get(f"{self.API}/ohlc/{symbol}/?step={self.BUCKET_S}&limit=1000&start={start}"))
+            traded = [r for r in rows if r[5] > 0]
+            if traded:
+                return traded[0][0]
+            start += 1000 * self.BUCKET_S
+        return None
 
     def fetch(self, symbol: str, start_ms: int, end_ms: int, stop=None) -> list:
         # start is inclusive and the window runs `limit` minutes from it; with end too, start is ignored (checked 2026-11-12)
