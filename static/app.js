@@ -8,9 +8,9 @@
   var TF_S = {'1h':3600, '4h':14400, '1D':86400, '1W':604800};
   var $ = UI.$, esc = UI.esc;
 
-  var P = {}; try { P = JSON.parse(localStorage.getItem('dollarbars') || '{}'); } catch (e) {}
+  var P = {}, LS = false; try { P = JSON.parse(localStorage.getItem('dollarbars') || '{}'); LS = true; } catch (e) {}
   var market = (location.hash || '').slice(1) || P.market || 'all:BTC';
-  var toCombined = !P.combined;                                   // once: a Bybit-only chart saved by an older version opens as its combined chart
+  var toCombined = LS && !P.combined, toTries = 0;              // once: a Bybit-only chart saved by an older version opens as its combined chart
   var mode = P.mode || 'dollar', sizes = P.sizes || {}, size = sizes[market] || null, tf = P.tf || '1D', logScale = !!P.log;
   var meta = null, bars = [], forming = null, byTime = {}, loading = false, retryTimer = null, restarting = false, update = null;
   var lastFullLoad = 0, qTimer = null, lastRows = [], seq = 0;
@@ -271,7 +271,11 @@
       if (kk !== key()) { moved = true; return; }                           // a menu change meanwhile: this answer holds the old set only
       if (j.error) { setStatus({sync:'error'}, j.error); $('empty').textContent = j.error; $('empty').className = 'show'; return; }
       meta = j.meta; setStatus(meta); setTicker(meta.market); checkUpdate(meta);
-      if (toCombined) { toCombined = false; if (meta.market && meta.market.kind !== 'all' && meta.market.ticker) { go('all:' + meta.market.ticker); return; } }
+      if (toCombined && meta.market && meta.market.kind !== 'all') {
+        if (meta.market.found) { toCombined = false; go('all:' + meta.market.ticker); return; }
+        if (meta.index_status === 'loading instruments' && ++toTries < 6) { $('empty').textContent = 'loading the market list…'; $('empty').className = 'show'; scheduleRetry(); return; }
+      }
+      toCombined = false;
       if (!Object.keys(j.keys).length) {
         $('empty').textContent = meta.sync.indexOf('failed') === 0 ? meta.sync : (meta.notice ? meta.notice + ' · ' : '') + (meta.sync === 'backfilling' ? 'first candles arriving…' : 'waiting for the server to load ' + (meta.market.ticker || mk) + '…') +
           (meta.live_err ? ' — last attempt failed: ' + meta.live_err + ' (retrying)' : '');

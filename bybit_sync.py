@@ -120,7 +120,14 @@ def write_durably(dest: Path, write) -> None:
             write(f)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, dest)
+        for attempt in range(20):                                # Windows: a reader holding dest open blocks the rename for a moment
+            try:
+                os.replace(tmp, dest)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
         if os.name != "nt":                                      # POSIX: the rename itself lasts once the directory is synced
             fd = os.open(dest.parent, os.O_RDONLY)
             try:

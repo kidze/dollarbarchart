@@ -293,6 +293,114 @@ def test_paths_are_filesystem_safe():
     assert V.path("bybit", "linear:BTCUSDT").name == "bybit_linear_BTCUSDT.parquet"
 
 
+def test_trust_judges_a_jump_across_a_hole_over_the_same_days():
+    days = 90
+    ref = series(T0, days * 1440, px=100, seed=12)
+    rise = np.exp(np.log(1.2) * np.clip((ref["ts"].to_numpy() - (T0 + 40 * V.DAY)) / V.DAY, 0, 10))   # 1.2x a day for 10 days
+    for c in ("open", "high", "low", "close"):
+        ref[c] = ref[c] * rise
+    holed = ref[(ref["ts"] < T0 + 40 * V.DAY) | (ref["ts"] >= T0 + 50 * V.DAY)].copy()   # 10 days without candles: 6x across them
+    assert len(C.trust(holed, C.daily_close(ref))) == len(holed)    # the reference made the same move over those days
+    assert C.trust(holed, None)["ts"].iloc[0] >= T0 + 50 * V.DAY    # no reference: the jump is not explained
+
+
+def test_trust_cuts_at_a_run_of_mismatched_days_not_at_scattered_ones():
+    ref = series(T0, 400 * 1440, px=100, seed=13)
+    scattered = ref.copy()
+    for d in (20, 100, 200, 380):                                    # wild two-day spells months apart: a thin venue's bad prints
+        on = scattered["ts"].between(T0 + d * V.DAY, T0 + (d + 2) * V.DAY - 1)
+        scattered.loc[on, ["open", "high", "low", "close"]] *= 1.6
+    assert len(C.trust(scattered, C.daily_close(ref))) == len(scattered)
+    run = ref.copy()                                                 # days 100..109 another coin at 1.6x, scattered ones later
+    run.loc[run["ts"].between(T0 + 100 * V.DAY, T0 + 110 * V.DAY - 1), ["open", "high", "low", "close"]] *= 1.6
+    on = run["ts"].between(T0 + 300 * V.DAY, T0 + 301 * V.DAY - 1)
+    run.loc[on, ["open", "high", "low", "close"]] *= 1.6
+    assert T0 + 109 * V.DAY < C.trust(run, C.daily_close(ref))["ts"].iloc[0] <= T0 + 111 * V.DAY   # (T0 is not a UTC midnight)
+
+
+class Flaky(Fake):
+    """A forward venue whose requests fail from the n-th on (a network drop); raise_on_stop = fails as a stop lands."""
+
+    def __init__(self, df, now_ms, fail_at):
+        super().__init__(df, now_ms)
+        self.fail_at = fail_at
+
+    def fetch(self, symbol, start_ms, end_ms, stop=None):
+        if self.requests >= self.fail_at:
+            self.requests += 1
+            raise OSError("connection reset")
+        return super().fetch(symbol, start_ms, end_ms, stop)
+
+
+class FlakyReverse(FakeReverse):
+    def __init__(self, df, now_ms, fail_at):
+        super().__init__(df, now_ms)
+        self.fail_at = fail_at
+
+    def fetch_before(self, symbol, ts_ms, stop=None):
+        if self.requests >= self.fail_at:
+            self.requests += 1
+            raise OSError("connection reset")
+        return super().fetch_before(symbol, ts_ms, stop)
+
+
+def test_a_failure_part_way_keeps_what_arrived_and_a_stop_is_a_pause():
+    scratch()
+    full = series(T0, 1500, seed=14)
+    v = Flaky(full, int(full["ts"].iloc[-1]), fail_at=7)
+    try:
+        V.sync(v, "F")
+        assert False, "expected the network error"
+    except OSError:
+        pass
+    assert len(V.load("fake", "F")) == 700                           # the 7 pages before the error are on disk (no flush was due)
+    v.fail_at = 10 ** 9
+    assert V.sync(v, "F")["n"] == 1500 and V.load("fake", "F")["ts"].tolist() == full["ts"].tolist()
+    scratch()
+    halt = {"on": False}
+    v = Flaky(full, int(full["ts"].iloc[-1]), fail_at=5)
+    orig = v.fetch
+
+    def fetch(symbol, a, b, stop=None):                              # the stop lands while a request is failing
+        if v.requests >= v.fail_at:
+            halt["on"] = True
+        return orig(symbol, a, b, stop)
+    v.fetch = fetch
+    res = V.sync(v, "G", stop=lambda: halt["on"])
+    assert res["result"] == "stopped" and res["n"] == 500 and len(V.load("fake", "G")) == 500
+
+
+def test_a_reverse_failure_keeps_history_pages_but_not_half_a_tail():
+    scratch()
+    full = series(T0, 2000, seed=15)
+    v = FlakyReverse(full, int(full["ts"].iloc[999]), fail_at=10 ** 9)
+    V.sync(v, "Q")                                                   # minutes 0..999, history done
+    v.now = int(full["ts"].iloc[-1]); set_now(v.now)
+    v.fail_at = v.requests + 4                                       # the tail walk (1000 new minutes) fails after 4 pages
+    try:
+        V.sync(v, "Q")
+        assert False, "expected the network error"
+    except OSError:
+        pass
+    assert V.load("fakerev", "Q")["ts"].iloc[-1] == full["ts"].iloc[999]   # nothing half-walked was kept: no hole
+    v.fail_at = 10 ** 9
+    assert V.load("fakerev", "Q")["ts"].tolist() == full["ts"].iloc[:1000].tolist()
+    V.sync(v, "Q")
+    assert V.load("fakerev", "Q")["ts"].tolist() == full["ts"].tolist()
+    scratch()                                                        # a fresh series failing in its history walk keeps the pages
+    v = FlakyReverse(full, int(full["ts"].iloc[-1]), fail_at=12)
+    try:
+        V.sync(v, "Q2")
+        assert False, "expected the network error"
+    except OSError:
+        pass
+    on_disk = V.load("fakerev", "Q2")
+    assert len(on_disk) == 1200 and on_disk["ts"].iloc[-1] == full["ts"].iloc[-1]
+    v.fail_at = 10 ** 9
+    V.sync(v, "Q2", list_ms=T0)
+    assert V.load("fakerev", "Q2")["ts"].tolist() == full["ts"].tolist() and V.load_side("fakerev", "Q2")["history_done"]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

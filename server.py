@@ -64,6 +64,8 @@ DEFAULT_MARKET = "all:BTC"
 CORE = ["server.py", "bars.py", "bybit_sync.py", "markets.py", "userdata.py", "venues.py", "combined.py", "index.html", "lightweight-charts.js"]
 REBUILD_S = 300                                                  # a combined market is re-merged this often while its history downloads
 PRICE_BAND = 0.10                                                # a series whose price is further than this from the reference is another coin
+LIVE_GAP_S = 100                                                 # an exchange unanswered this long missed minutes its 3-minute poll no longer covers
+STALE_PRICE_S = 3600                                             # the price check ignores a last candle older than this (a quiet pair)
 RESYNC_S = 900                                                   # a combined market with a failed exchange tries it (only it) again after this
 CACHE_REFRESH_DAYS = 7                                           # the merge cache is rewritten once the days merged on top of it reach this
 POOL = ThreadPoolExecutor(12, thread_name_prefix="live")         # the combined markets' live polls, all exchanges at once
@@ -102,6 +104,9 @@ class Market:
         self.built_at = 0.0                                      # all:<T> only: when the merged series was last rebuilt
         self.resync_at = 0.0                                     # all:<T> only: an exchange failed, try again after this
         self.retry_failed = False                                # all:<T> only: the next sync retries just the failed exchanges
+        self.replan = False                                      # all:<T> only: an exchange's market list was missing at plan time: plan again
+        self.live_ok = {}                                        # all:<T> only: label -> when its live poll last answered
+        self.live_stale = False                                  # all:<T> only: an exchange missed live minutes: re-merge from the files
 
     @property
     def combined(self) -> bool:
@@ -290,15 +295,15 @@ def evict() -> None:
 def market_info(key: str) -> dict:
     category, symbol = parse_key(key)
     info = {"key": key, "ticker": symbol, "name": "", "kind": "all" if category == "all" else "spot" if category == "spot" else "perp",
-            "symbol": "" if category == "all" else symbol, "quote": "", "first": None, "stock": False}
+            "symbol": "" if category == "all" else symbol, "quote": "", "first": None, "stock": False, "found": False}
     idx = STATE["index"]
     if idx:
         for r in idx:
             if category == "all" and r["ticker"] == symbol:
-                info.update({"name": r["name"], "stock": r["stock"]})
+                info.update({"name": r["name"], "stock": r["stock"], "found": True})
                 break
             if r["key"] == key:
-                info.update({k: r[k] for k in ("ticker", "name", "kind", "symbol", "quote", "first", "stock")})
+                info.update({k: r[k] for k in ("ticker", "name", "kind", "symbol", "quote", "first", "stock")}, found=True)
                 break
     info["watch"] = info["ticker"] in STATE["watchlist"]
     return info
@@ -534,11 +539,11 @@ def sync_market(m: Market, job) -> None:
 
 # ---------------------------------------------------------------- combined markets: all:<TICKER>
 
-def plan_all(ticker: str) -> list:
+def plan_all(ticker: str) -> tuple:
     """The series a combined market is made of: one spot and one perp per exchange. On Bybit, the deepest
     market of each kind whose display ticker is exactly this one (USDT first; 1000x contracts are left out
     because their prices are not the coin's). Each entry tracks its own download: status queued | syncing |
-    done | paused | absent: why | failed: why."""
+    done | paused | absent: why | failed: why. Returns (series, exchanges whose market list is missing)."""
     series = []
     exact = [r for r in MK.candidates(STATE["index"] or [], ticker) if r["ticker"] == ticker and r.get("first") != 0]
     for kind in ("perp", "spot"):
@@ -551,36 +556,39 @@ def plan_all(ticker: str) -> list:
     except Exception as e:
         log(f"{ticker}: exchange instrument lists failed: {type(e).__name__}: {e}")
         inst = {}
+    missing = [v for v in V.VENUES if v != "bybit" and not inst.get(v)]
     for g in V.markets_for(ticker, inst, MK.ALIASES):
         if g["venue"] != "bybit":
             series.append({"venue": g["venue"], "symbol": g["symbol"], "kind": g["kind"], "list_ms": g["list_ms"]})
     for s in series:
         v = V.VENUES[s["venue"]]
         s.update(label=v.label(s["symbol"], s["kind"]), exact=v.exact_dollars, status="queued", pct=None, n=0, first=None, note="")
-    return series
+    return series, missing
 
 
 def latest_price(s: dict):
     try:
         rows = V.VENUES[s["venue"]].latest(s["symbol"], 2)
-        return rows[-1][4] if rows else None
+        return rows[-1][4] if rows and rows[-1][0] >= (time.time() - STALE_PRICE_S) * 1000 else None
     except Exception:
         return None
 
 
-def price_check(m: Market) -> None:
+def price_check(m: Market, series=None) -> None:
     """A ticker means different coins on different exchanges now and then (LIT is Lighter on Bybit and
     Litentry on KuCoin; OKX's QNT perp is not Quant). Every series' latest price is compared with Bybit's
     perp (else Bybit's spot, else the median of all answers); one further than PRICE_BAND away is left out.
-    A series that does not answer stays in: trust() checks its history against the reference at merge time."""
+    A series that does not answer (or has not traded for an hour) stays in: trust() checks its history against
+    the reference at merge time. series = the ones to judge (default: all)."""
     prices = list(POOL.map(latest_price, m.venues))
     ref = next((px for s, px in zip(m.venues, prices) if s["venue"] == "bybit" and s["kind"] == "perp" and px), None)
     ref = ref or next((px for s, px in zip(m.venues, prices) if s["venue"] == "bybit" and px), None)
     ref = ref or (float(np.median([px for px in prices if px])) if any(prices) else None)
     if not ref:
         return
+    judged = m.venues if series is None else series
     for s, px in zip(m.venues, prices):
-        if px and abs(px / ref - 1) > PRICE_BAND:
+        if px and abs(px / ref - 1) > PRICE_BAND and any(s is j for j in judged):
             s["status"] = f"absent: price {px:g} vs {ref:g}, another coin with this ticker?"
             log(f"{m.key}: {s['label']} left out: {s['status']}")
 
@@ -615,10 +623,11 @@ def merged_frame(m: Market) -> pd.DataFrame:
     ref = next((f for s, f in loaded if s["venue"] == "bybit" and s["kind"] == "perp"), None)
     ref = ref if ref is not None else next((f for s, f in loaded if s["venue"] == "bybit"), None)
     ref = ref if ref is not None else (max((f for _, f in loaded), key=len) if loaded else None)
-    ref_daily = C.daily_close(ref) if ref is not None else None
+    ref_kept = C.trust(ref, None, jumps=False) if ref is not None else None
+    ref_daily = C.daily_close(ref_kept) if ref_kept is not None else None
     frames, labels = [], []
     for s, f in loaded:
-        kept = C.trust(f, None, jumps=False) if f is ref else C.trust(f, ref_daily)
+        kept = ref_kept if f is ref else C.trust(f, ref_daily)
         if len(kept) == len(f):
             s["note"] = ""
         elif not len(kept):
@@ -718,17 +727,29 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
     only_failed: the retry of exchanges that failed last time; the others are left alone (no re-merge unless one recovers)."""
     _, ticker = parse_key(m.key)
     stop = lambda: preempted(job)
-    if m.venues is None:
+    if m.venues is None or m.replan:
         if STATE["index"] is None:                               # Bybit's list is not in yet (first launch, slow network): plan later
             m.retry_at = time.time() + 5
             return
-        m.sync = "loading"
-        m.venues = plan_all(ticker)
-        if not m.venues:
+        planned, missing = plan_all(ticker)
+        known = {s["label"] for s in m.venues or []}
+        fresh = [s for s in planned if s["label"] not in known]
+        if m.venues is None and not planned:
+            if missing:                                          # the exchanges' lists did not arrive (network?): ask again soon
+                m.sync, m.retry_at = "queued", time.time() + 60
+                m.live_err = "market lists of " + ", ".join(V.VENUES[v].title for v in missing) + " did not load, retrying"
+                return
             m.sync = "failed: no exchange lists this ticker"
             return
-        price_check(m)
-        log(f"{m.key}: {len(m.venues)} series: " + ", ".join(s["label"] + (" (left out)" if s["status"].startswith("absent") else "") for s in m.venues))
+        if m.venues is None:
+            m.sync = "loading"
+        m.venues = (m.venues or []) + fresh
+        m.replan = bool(missing)
+        if missing:
+            log(f"{m.key}: market lists missing for {', '.join(missing)}: planned again later")
+        if fresh:
+            price_check(m, fresh)
+            log(f"{m.key}: {len(fresh)} series: " + ", ".join(s["label"] + (" (left out)" if s["status"].startswith("absent") else "") for s in fresh))
     if build and m.cd is None:
         m.sync = "loading"
         rebuild_all(m)                                           # what is on disk shows at once
@@ -737,12 +758,13 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
         m.live_err = ""
     groups = {}
     for s in m.venues:
-        if s["status"].startswith("absent") or (only_failed and not s["status"].startswith("failed")):
+        if s["status"].startswith("absent") or (only_failed and s["status"] == "done"):
             continue
         s["status"] = "queued"
         groups.setdefault(s["venue"], []).append(s)
     if only_failed and not groups:
         m.sync = "live"
+        m.resync_at = time.time() + RESYNC_S if m.replan else 0.0
         return
 
     def run(series):
@@ -787,14 +809,18 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
             m.sync = "live"
             m.synced = True
             m.live_rows = {}
-            m.resync_at = time.time() + RESYNC_S if failed else 0.0
+            m.live_ok = {s["label"]: time.time() for s in m.venues if s["status"] == "done"}
+            m.live_stale = False
+            m.resync_at = time.time() + RESYNC_S if failed or m.replan else 0.0
             n_done = sum(1 for s in m.venues if s["status"] == "done")
             log(f"{m.key}: live with {m.cd.n:,} merged minutes from {n_done} series" + (f", {len(failed)} failed" if failed else ""))
 
 
 def live_rows_all(m: Market) -> tuple:
     """Every done series' newest minutes, polled at once; each series' minutes are remembered so one failed
-    poll does not drop its dollars from a minute. Returns (merged rows of the last three minutes, error text)."""
+    poll does not drop its dollars from a minute. A series that answers again after LIVE_GAP_S of failures
+    marks the market stale (its missed minutes are refilled from the exchange). Returns (merged rows of the
+    last three minutes, error text)."""
     order = {v: i for i, v in enumerate(V.PRIORITY)}
     done = sorted([s for s in (m.venues or []) if s["status"] == "done" and s.get("n")],
                   key=lambda s: (s["kind"] != "perp", order.get(s["venue"], 9)))
@@ -807,6 +833,12 @@ def live_rows_all(m: Market) -> tuple:
 
     err = ""
     for s, rows, e in POOL.map(poll, done):
+        if not e:
+            now = time.time()
+            prev = m.live_ok.get(s["label"])
+            if prev is not None and now - prev > LIVE_GAP_S:
+                m.live_stale = True
+            m.live_ok[s["label"]] = now
         if rows:
             known = m.live_rows.setdefault(s["label"], {})
             for r in rows:
@@ -943,8 +975,11 @@ def live_loop() -> None:
                 with LOCK:
                     cd = m.cd
                     last = int(cd.ts[cd.n - 1])
-                gap = 5 * B.MINUTE if m.combined else X.WINDOW
-                if rows and rows[-1][0] - last >= gap:           # missed minutes (a long sleep): the worker walks them
+                if m.combined and m.live_stale and now - m.built_at > REBUILD_S:
+                    with LOCK:                                   # an exchange (or the machine) missed minutes: the worker
+                        m.sync = "backfilling"                   # catches every file up and merges again
+                    continue
+                if not m.combined and rows and rows[-1][0] - last >= X.WINDOW:   # missed minutes (a long sleep): the worker walks them
                     with LOCK:
                         m.sync = "backfilling"
                     continue

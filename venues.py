@@ -28,6 +28,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+try:
+    import websocket                                             # websocket-client: Binance's live minutes (else REST every poll)
+except ImportError:
+    websocket = None
 import pandas as pd
 
 import bybit_sync as X
@@ -43,8 +47,9 @@ FLUSH_REQUESTS = 500
 
 
 def _get(url: str, timeout: float = 20, attempts: int = 6, stop=None, raw: bool = False):
-    """GET JSON (raw=True: the bytes). A 4xx that is not a rate limit (or Bitfinex's 500 "error" body) =
-    LookupError: bad symbol or range, do not retry. Everything else is retried with a growing pause."""
+    """GET JSON (raw=True: the bytes). A 4xx that is not a rate limit or a refusal that can pass (403: a
+    firewall's ban), or Bitfinex's 500 "error" body = LookupError: bad symbol or range, do not retry.
+    Everything else is retried with a growing pause."""
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
@@ -55,7 +60,7 @@ def _get(url: str, timeout: float = 20, attempts: int = 6, stop=None, raw: bool 
                 body = e.read(200).decode("utf-8", "replace")
             except Exception:
                 pass
-            if (400 <= e.code < 500 and e.code not in (408, 418, 425, 429)) or (e.code == 500 and body.startswith('["error"')):
+            if (400 <= e.code < 500 and e.code not in (403, 408, 418, 425, 429)) or (e.code == 500 and body.startswith('["error"')):
                 raise LookupError(f"HTTP {e.code} {body[:80]}")
             if attempt == attempts - 1 or (stop and stop()):
                 raise
@@ -244,15 +249,22 @@ class Binance(Venue):
         kind, sym = self.split(symbol)
         with self._lock:
             st = self._streams.get(symbol)
-            if st is None or not st.alive():
+            if websocket is None:                                # no websocket-client: one REST read per poll
+                st = None
+            elif st is None or not st.alive():
                 st = self._streams[symbol] = _Stream(self.WS[kind].format(sym.lower()), lambda: self._rest(kind, sym, int(time.time() * 1000) - 4 * MINUTE, int(time.time() * 1000), attempts=1))
+        if st is None:
+            now = int(time.time() * 1000)
+            rows = self._rest(kind, sym, now - (n + 1) * MINUTE, now, attempts=1)
+            return [list(r) for r in rows if r[0] > rows[-1][0] - n * MINUTE] if rows else []
         return st.latest(n)
 
 
 class _Stream:
     """One Binance kline websocket: keeps the last few minutes, seeded by one REST request so the minutes before
     the connection are there too. Closes itself two minutes after the last read; a new read reopens it.
-    If the stream has said nothing for 30 s, reads fall back to REST, at most once per 20 s."""
+    If the stream has said nothing for 30 s, reads fall back to REST, at most once per 20 s; a read raises when
+    neither has answered for 45 s."""
 
     IDLE_S = 120
 
@@ -262,6 +274,7 @@ class _Stream:
         self.used = time.time()
         self.heard = 0.0
         self.rest_at = 0.0
+        self.rest_ok = 0.0
         self.closed = False
         threading.Thread(target=self.run, daemon=True, name="binance-ws").start()
 
@@ -277,7 +290,6 @@ class _Stream:
                 del self.rows[t]
 
     def run(self) -> None:
-        import websocket                                         # websocket-client; only the live chart needs it
         try:
             while time.time() - self.used < self.IDLE_S:
                 try:
@@ -312,8 +324,11 @@ class _Stream:
             self.rest_at = now
             try:
                 self.put(self.rest())
+                self.rest_ok = now
             except Exception:
                 pass
+        if now - max(self.heard, self.rest_ok) > 45:             # neither the stream nor REST: say so (the poll counts as failed)
+            raise RuntimeError("no live minutes from Binance")
         with self.lock:
             if not self.rows:
                 return []
@@ -657,7 +672,12 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
         if not hold and (len(new) >= FLUSH_ROWS or since_flush >= FLUSH_REQUESTS):
             flush()
 
+    holding = [False]                                            # a reverse tail walk is keeping its rows in memory
+
     def finish(result):
+        if holding[0]:
+            new.clear()                                          # the unfinished tail is fetched again next time
+            holding[0] = False
         flush()
         if hasattr(venue, "forget"):
             venue.forget(symbol)
@@ -669,84 +689,96 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
         save_side(venue.name, symbol, side)
         return out
 
-    if not venue.reverse:
-        if len(frame):
-            cursor = int(frame["ts"].iloc[-1])                   # refetched: it may have been forming
-            first = int(frame["ts"].iloc[0])
-        else:
-            first = venue.first_ms(symbol)
-            if first is None:
-                raise LookupError(f"{venue.title} has no candles for {symbol}")
-            cursor = first
-        side["first"] = first
-        side["history_done"] = True                              # forward venues start at the first candle
-        span = max(1, now_ms - first)
-        while True:
-            if stop and stop():
-                return finish("stopped")
-            end = cursor + venue.window * MINUTE - 1
-            rows = [r for r in venue.fetch(symbol, cursor, end, stop=stop) if cursor <= r[0] <= end]   # some venues pad the window
-            if rows:
-                take(rows)
-                last = rows[-1][0]
-                if progress:
-                    progress(min(100.0, (last - first) / span * 100), last)
-                if last >= now_ms - MINUTE:
-                    break
-                cursor = last + MINUTE
+    def run():
+        if not venue.reverse:
+            if len(frame):
+                cursor = int(frame["ts"].iloc[-1])               # refetched: it may have been forming
+                first = int(frame["ts"].iloc[0])
             else:
-                if end >= now_ms:
-                    break
-                cursor = end + 1
-            time.sleep(venue.pause)
+                first = venue.first_ms(symbol)
+                if first is None:
+                    raise LookupError(f"{venue.title} has no candles for {symbol}")
+                cursor = first
+            side["first"] = first
+            side["history_done"] = True                          # forward venues start at the first candle
+            span = max(1, now_ms - first)
+            while True:
+                if stop and stop():
+                    return finish("stopped")
+                end = cursor + venue.window * MINUTE - 1
+                rows = [r for r in venue.fetch(symbol, cursor, end, stop=stop) if cursor <= r[0] <= end]   # some venues pad the window
+                if rows:
+                    take(rows)
+                    last = rows[-1][0]
+                    if progress:
+                        progress(min(100.0, (last - first) / span * 100), last)
+                    if last >= now_ms - MINUTE:
+                        break
+                    cursor = last + MINUTE
+                else:
+                    if end >= now_ms:
+                        break
+                    cursor = end + 1
+                time.sleep(venue.pause)
+            out = finish("done")
+            if out["n"] == 0:
+                raise LookupError(f"{venue.title} has no candles for {symbol}")
+            return out
+
+        # a reverse venue (OKX): walk back from now to the newest stored candle, then from the oldest one to the listing
+        def walk_back(hi, floor, hold=False):
+            """fetch_before(hi) repeatedly, back to `floor` (exclusive; None = to the listing). "done" | "dry" | "stopped".
+            hold = keep the rows in memory until the walk is complete (a tail walk stopped halfway would otherwise
+            leave a hole between the old newest candle and where it stopped, which no later tail walk revisits)."""
+            while True:
+                if stop and stop():
+                    return "stopped"
+                rows = venue.fetch_before(symbol, hi, stop=stop)
+                if not rows:
+                    return "dry"
+                if floor is not None:
+                    rows = [r for r in rows if r[0] > floor]
+                if rows:
+                    take(rows, hold)
+                    if progress:
+                        progress(*_reverse_progress(rows[0][0], floor, list_ms or side.get("first") or 0, now_ms))
+                if floor is not None and (not rows or rows[0][0] <= floor + MINUTE):
+                    return "done"
+                hi = rows[0][0]
+                time.sleep(venue.pause)
+
+        newest = int(frame["ts"].iloc[-1]) if len(frame) else None
+        holding[0] = newest is not None
+        r = walk_back(now_ms + MINUTE, newest, hold=holding[0])
+        if r == "stopped":
+            return finish("stopped")
+        holding[0] = False
+        if newest is None and r == "dry":                        # a fresh series: the tail walk reached the listing
+            side["history_done"] = True
+        if not side.get("history_done"):
+            flush()
+            lo = int(frame["ts"].iloc[0]) if len(frame) else None
+            if lo is None:
+                raise LookupError(f"{venue.title} has no candles for {symbol}")
+            r = walk_back(lo, None)
+            if r == "stopped":
+                return finish("stopped")
+            side["history_done"] = True
         out = finish("done")
         if out["n"] == 0:
             raise LookupError(f"{venue.title} has no candles for {symbol}")
         return out
 
-    # a reverse venue (OKX): walk back from now to the newest stored candle, then from the oldest one to the listing
-    def walk_back(hi, floor, hold=False):
-        """fetch_before(hi) repeatedly, back to `floor` (exclusive; None = to the listing). "done" | "dry" | "stopped".
-        hold = keep the rows in memory until the walk is complete (a tail walk stopped halfway would otherwise
-        leave a hole between the old newest candle and where it stopped, which no later tail walk revisits)."""
-        while True:
-            if stop and stop():
-                return "stopped"
-            rows = venue.fetch_before(symbol, hi, stop=stop)
-            if not rows:
-                return "dry"
-            if floor is not None:
-                rows = [r for r in rows if r[0] > floor]
-            if rows:
-                take(rows, hold)
-                if progress:
-                    progress(*_reverse_progress(rows[0][0], floor, list_ms or side.get("first") or 0, now_ms))
-            if floor is not None and (not rows or rows[0][0] <= floor + MINUTE):
-                return "done"
-            hi = rows[0][0]
-            time.sleep(venue.pause)
-
-    newest = int(frame["ts"].iloc[-1]) if len(frame) else None
-    r = walk_back(now_ms + MINUTE, newest, hold=newest is not None)
-    if r == "stopped":
-        if newest is not None:
-            new.clear()                                          # the unfinished tail is fetched again next time
-        return finish("stopped")
-    if newest is None and r == "dry":                            # a fresh series: the tail walk reached the listing
-        side["history_done"] = True
-    if not side.get("history_done"):
-        flush()
-        lo = int(frame["ts"].iloc[0]) if len(frame) else None
-        if lo is None:
-            raise LookupError(f"{venue.title} has no candles for {symbol}")
-        r = walk_back(lo, None)
-        if r == "stopped":
-            return finish("stopped")
-        side["history_done"] = True
-    out = finish("done")
-    if out["n"] == 0:
-        raise LookupError(f"{venue.title} has no candles for {symbol}")
-    return out
+    try:
+        return run()
+    except Exception as e:
+        try:                                                     # keep what arrived before the error (or the stop)
+            out = finish("stopped")
+        except Exception:
+            out = None
+        if out is not None and stop and stop() and not isinstance(e, LookupError):
+            return out                                           # stopped part-way through a request: a pause, not a failure
+        raise
 
 
 def _reverse_progress(at_ms: int, floor, first_guess: int, now_ms: int):

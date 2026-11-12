@@ -21,6 +21,7 @@ DAY = 86_400_000
 CHUNK = 250_000
 RELIST_GAP = 14 * DAY                                            # a hole this long = delisted and listed again: keep what follows it
 MISMATCH = 0.30                                                  # a day whose close is this far from the reference's is another coin
+MISMATCH_DAYS, MISMATCH_SPAN = 3, 30 * DAY                       # ... once this many such days fall within this span
 JUMP = 4.0                                                       # a day whose price is this many times the day before's: another coin took the symbol
 
 
@@ -102,12 +103,13 @@ def daily_close(f: pd.DataFrame) -> pd.Series:
 def trust(f: pd.DataFrame, ref_daily=None, jumps: bool = True) -> pd.DataFrame:
     """The part of a venue's series that is the same coin as the reference:
     - nothing before a relisting gap (RELIST_GAP without a candle);
-    - nothing up to and including a day whose price is JUMP times (or 1/JUMP) the day before's, unless the
-      reference moved the same way that day: exchanges hand a symbol to a new coin without a gap (Binance's
-      LITUSDT perp was Litentry until 2025-12-23, then Lighter at 6x the price; PUMPUSDT changed coins on
-      2025-07-10 at a tenth);
-    - nothing up to the last day whose price is more than MISMATCH away from the reference's, once three or more
-      days are (another coin under the same ticker, or a redenomination; one wild day is not enough).
+    - nothing up to and including a day whose price is JUMP times (or 1/JUMP) the venue's previous day with
+      candles, unless the reference moved the same way over the same days: exchanges hand a symbol to a new
+      coin without a gap (Binance's LITUSDT perp was Litentry until 2025-12-23, then Lighter at 6x the price;
+      PUMPUSDT changed coins on 2025-07-10 at a tenth);
+    - nothing up to the end of the last run of MISMATCH_DAYS days within MISMATCH_SPAN whose prices are more than
+      MISMATCH away from the reference's (another coin under the same ticker, or a redenomination); scattered
+      wild days of a thin venue are not a run.
     Days the reference does not cover are otherwise kept. jumps=False for the reference itself."""
     if not len(f):
         return f
@@ -116,20 +118,24 @@ def trust(f: pd.DataFrame, ref_daily=None, jumps: bool = True) -> pd.DataFrame:
     cut = int(ts[gaps[-1] + 1]) if len(gaps) else None
     mine = daily_close(f)
     if jumps and len(mine) > 1:
-        step = (mine / mine.shift(1)).iloc[1:]
-        for day, r in step[(step > JUMP) | (step < 1 / JUMP)].items():
-            if ref_daily is not None and day in ref_daily.index and day - DAY in ref_daily.index:
-                rr = ref_daily.loc[day] / ref_daily.loc[day - DAY]
+        days, px = mine.index.to_numpy(np.int64), mine.to_numpy(float)
+        step = px[1:] / px[:-1]
+        for i in np.flatnonzero((step > JUMP) | (step < 1 / JUMP)):
+            before, day, r = int(days[i]), int(days[i + 1]), step[i]   # (before = the venue's previous day: holes happen)
+            if ref_daily is not None and day in ref_daily.index and before in ref_daily.index:
+                rr = ref_daily.loc[day] / ref_daily.loc[before]
                 if (rr > 2) == (r > 1) and (rr > 2 or rr < 0.5):  # the reference made the same move: a real one
                     continue
-            cut = max(cut or 0, int(day) + DAY)
+            cut = max(cut or 0, day + DAY)
     if ref_daily is not None and len(ref_daily):
         common = mine.index.intersection(ref_daily.index)
         if len(common):
             ratio = (mine.loc[common] / ref_daily.loc[common]).to_numpy()
-            bad = common[np.abs(ratio - 1) > MISMATCH]
-            if len(bad) >= 3:
-                after = int(bad.max()) + DAY
+            bad = np.sort(common[np.abs(ratio - 1) > MISMATCH].to_numpy(np.int64))
+            k = MISMATCH_DAYS - 1
+            runs = np.flatnonzero(bad[k:] - bad[:len(bad) - k] <= MISMATCH_SPAN) + k if len(bad) > k else []
+            if len(runs):                                        # the newest run's last day
+                after = int(bad[runs[-1]]) + DAY
                 cut = after if cut is None else max(cut, after)
     if cut is None:
         return f
