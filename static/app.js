@@ -8,19 +8,23 @@
   var TF_S = {'1h':3600, '4h':14400, '1D':86400, '1W':604800};
   var $ = UI.$, esc = UI.esc;
 
-  var P = {}; try { P = JSON.parse(localStorage.getItem('dollarbars') || '{}'); } catch (e) {}
-  var market = (location.hash || '').slice(1) || P.market || 'linear:BTCUSDT';
+  var P = {}, LS = false; try { P = JSON.parse(localStorage.getItem('dollarbars') || '{}'); LS = true; } catch (e) {}
+  var market = (location.hash || '').slice(1) || P.market || 'all:BTC';
+  var toCombined = LS && !P.combined, toTries = 0, settled = !toCombined;   // once: a Bybit-only chart saved by an older version opens as its combined chart
   var mode = P.mode || 'dollar', sizes = P.sizes || {}, size = sizes[market] || null, tf = P.tf || '1D', logScale = !!P.log;
   var meta = null, bars = [], forming = null, byTime = {}, loading = false, retryTimer = null, restarting = false, update = null;
   var lastFullLoad = 0, qTimer = null, lastRows = [], seq = 0;
-  var save = function(){ sizes[market] = size; try { localStorage.setItem('dollarbars', JSON.stringify({market:market, mode:mode, sizes:sizes, tf:tf, log:logScale})); } catch (e) {} };
+  var save = function(){ sizes[market] = size; try { localStorage.setItem('dollarbars', JSON.stringify({market:market, mode:mode, sizes:sizes, tf:tf, log:logScale, combined:settled ? 1 : 0})); } catch (e) {} };
   var fmtD = function(x){ return x >= 1e9 ? '$' + (x >= 1e10 ? (x/1e9).toFixed(0) : (x/1e9).toFixed(1)) + 'B' : x >= 1e6 ? '$' + (x >= 1e7 ? (x/1e6).toFixed(0) : (x/1e6).toFixed(1)) + 'M' : x >= 1e4 ? '$' + Math.round(x/1e3) + 'K' : x >= 1e3 ? '$' + (x/1e3).toFixed(1) + 'K' : '$' + Math.round(x); };
   var fmtP = function(p){ if (p < 0) return '-' + fmtP(-p); if (p >= 1000) return p.toLocaleString('en-US',{maximumFractionDigits:0}); if (p >= 1) return p.toFixed(p >= 100 ? 1 : 2); if (!(p > 0)) return String(p); return p.toFixed(Math.min(20, 3 - Math.floor(Math.log10(p)))); };
   var fmtT = function(t){ return new Date(t*1000).toISOString().slice(0,16).replace('T',' ') + 'Z'; };
   var fmtDay = function(t){ return new Date(t*1000).toISOString().slice(0,10); };
   var fmtMon = function(ms){ return new Date(ms).toISOString().slice(0,7); };
   var fmtHrs = function(h){ return h >= 48 ? (h/24).toFixed(1) + ' days' : h >= 1 ? h.toFixed(1) + ' h' : Math.round(h*60) + ' min'; };
-  var key = function(){ return mode === 'dollar' ? 'd:' + size : 't:' + tf; };
+  var adaptive = function(s){ return typeof s === 'string' && s.indexOf('a:') === 0; };   // 'a:6' = about 6 bars a day, sized from the 30 days before
+  var key = function(){ return mode === 'dollar' ? (adaptive(size) ? size : 'd:' + size) : 't:' + tf; };
+  var capOf = function(r){ return adaptive(size) ? r.z : size; };   // the dollars a bar needed to close
+  var sizeText = function(){ return adaptive(size) ? 'adaptive bars (≈' + size.slice(2) + ' a day)' : 'bars of ' + fmtD(size); };
   var MEDIAN = [['1h','median 1h'], ['4h','median 4h'], ['1D','median day'], ['1W','median week'], ['1M','median month']];
   var sizeNote = function(s){
     var md = meta.medians || {'1D': meta.auto_size}, n = MEDIAN.filter(function(m){ return md[m[0]] === s; }).map(function(m){ return m[1]; });
@@ -176,7 +180,7 @@
       var r = byTime[p.time]; if (!r) return;
       var chg = +(((r.c / r.o - 1) * 100).toFixed(2)), isForming = forming && r.t === forming.t;
       var head = mode === 'dollar'
-        ? '<b>' + fmtT(r.t) + ' → ' + fmtT(r.e) + '</b> · ' + (isForming ? 'forming, ' : 'took ') + '<b>' + fmtHrs((r.e - r.t)/3600) + '</b> (' + r.n + ' min) · ' + fmtD(r.d) + (isForming ? ' of ' + fmtD(size) : '') + ' traded'
+        ? '<b>' + fmtT(r.t) + ' → ' + fmtT(r.e) + '</b> · ' + (isForming ? 'forming, ' : 'took ') + '<b>' + fmtHrs((r.e - r.t)/3600) + '</b> (' + r.n + ' min) · ' + fmtD(r.d) + (isForming ? ' of ' + fmtD(capOf(r)) : adaptive(size) ? ' (size ' + fmtD(r.z) + ')' : '') + ' traded'
         : '<b>' + (tf === '1h' || tf === '4h' ? fmtT(r.t) : fmtDay(r.t)) + '</b> (' + tf + (isForming ? ', forming' : '') + ') · ' + fmtD(r.d) + ' traded';
       $('legend').innerHTML = head + '<br>O ' + fmtP(r.o) + ' · H ' + fmtP(r.h) + ' · L ' + fmtP(r.l) +
         ' · C ' + fmtP(r.c) + ' · <span style="color:' + (chg >= 0 ? '#2ebd85' : '#f23645') + '">' + (chg > 0 ? '+' : '') + chg.toFixed(2) + '%</span>';
@@ -204,13 +208,31 @@
       pr.className = 'show'; $('progFill').style.width = m.progress.pct + '%'; $('progPct').textContent = m.progress.pct.toFixed(0) + '%';
       $('progText').textContent = (m.notice || 'downloading minute candles') + ' · at ' + fmtDay(m.progress.at) + ' · the chart grows as they arrive';
     } else if (m.sync === 'queued' || m.sync === 'loading') {
-      pr.className = 'show'; $('progFill').style.width = '0%'; $('progPct').textContent = ''; $('progText').textContent = m.sync === 'loading' ? 'loading candles from disk…' : 'waiting for the downloader…';
+      pr.className = 'show'; $('progFill').style.width = '0%'; $('progPct').textContent = ''; $('progText').textContent = m.sync === 'loading' ? (m.venues ? 'merging the exchanges on disk…' : 'loading candles from disk…') : 'waiting for the downloader…';
     } else pr.className = '';
+    if (m.sync === 'backfilling' && m.venues && m.progress) $('progText').textContent = venueText(m);
+  }
+  function venueText(m){                                          // a combined market: which exchanges are downloading, how many are done
+    var cur = [], done = 0, all = 0;
+    m.venues.forEach(function(v){
+      if (v.status.indexOf('absent') === 0) return;
+      all++;
+      if (v.status === 'done') done++; else if (v.status === 'syncing') cur.push(v.label + (v.pct != null ? ' ' + Math.round(v.pct) + '%' : ''));
+    });
+    return (cur.length ? 'downloading ' + cur.join(', ') : 'catching up') + ' · ' + done + ' of ' + all + ' series done · the chart grows as they arrive';
   }
   function setTicker(info){
     if (!info) return;
     $('tName').textContent = info.ticker || market;
-    $('tSub').textContent = (info.kind === 'perp' ? 'perp' : 'spot') + ' · Bybit ' + (info.symbol || '') + (info.name ? ' · ' + info.name : '');
+    if (info.kind === 'all') {
+      var vs = meta && meta.venues ? meta.venues.filter(function(v){ return v.n > 0; }) : [], ex = {};
+      vs.forEach(function(v){ ex[v.label.split(' ')[0]] = 1; });
+      $('tSub').textContent = 'combined' + (vs.length ? ' · ' + Object.keys(ex).length + ' exchanges, ' + vs.length + ' markets' : '') + (info.name ? ' · ' + info.name : '');
+      $('tSub').title = vs.map(function(v){ return v.label + (v.note ? ' (' + v.note + ')' : ''); }).join(String.fromCharCode(10));
+    } else {
+      $('tSub').textContent = (info.kind === 'perp' ? 'perp' : 'spot') + ' · Bybit only ' + (info.symbol || '') + (info.name ? ' · ' + info.name : '');
+      $('tSub').title = '';
+    }
     $('star').className = 'tb icon' + (info.watch ? ' on' : ''); $('star').textContent = info.watch ? '★' : '☆';
     document.title = (info.ticker || market) + ' dollar bars';
   }
@@ -223,11 +245,11 @@
     bars.forEach(function(b){ months[fmtDay(b.t).slice(0,7)]++; });
     var full = Object.keys(months).filter(function(k){ return k !== m0 && k !== m1; });   // drop the two partial months
     var busy = full.slice().sort(function(a,b){ return months[b]-months[a]; })[0], quiet = full.slice().sort(function(a,b){ return months[a]-months[b]; })[0];
-    var what = mode === 'dollar' ? 'bars of ' + fmtD(size) : tf + ' bars';
+    var what = mode === 'dollar' ? sizeText() : tf + ' bars';
     $('stats').innerHTML = '<b>' + n.toLocaleString() + '</b> ' + what + ' since ' + fmtDay(bars[0].t) +
       (mode === 'dollar' ? ' · median bar <b>' + fmtHrs(med) + '</b> (fastest ' + fmtHrs(hrs[0]) + ', slowest ' + fmtHrs(hrs[n-1]) + ')' : '') +
       (busy ? ' · busiest month <b>' + busy + '</b> ' + months[busy] + ' bars, quietest <b>' + quiet + '</b> ' + months[quiet] : '') +
-      ' · last 365 days <b>' + last365 + '</b>' + (forming ? ' · forming: ' + (mode === 'dollar' ? fmtD(forming.d) + ' of ' + fmtD(size) + ' (' + Math.round(forming.d/size*100) + '%)' : 'open since ' + fmtT(forming.t)) : '');
+      ' · last 365 days <b>' + last365 + '</b>' + (forming ? ' · forming: ' + (mode === 'dollar' ? fmtD(forming.d) + ' of ' + fmtD(capOf(forming)) + ' (' + Math.round(forming.d/capOf(forming)*100) + '%)' : 'open since ' + fmtT(forming.t)) : '');
   }
   function render(reset){
     byTime = {}; bars.forEach(function(b){ byTime[b.t] = b; });
@@ -249,6 +271,13 @@
       if (kk !== key()) { moved = true; return; }                           // a menu change meanwhile: this answer holds the old set only
       if (j.error) { setStatus({sync:'error'}, j.error); $('empty').textContent = j.error; $('empty').className = 'show'; return; }
       meta = j.meta; setStatus(meta); setTicker(meta.market); checkUpdate(meta);
+      if (toCombined) {
+        var mm = meta.market || {};
+        if (mm.kind !== 'all' && mm.found) { toCombined = false; settled = true; go('all:' + mm.ticker); return; }
+        if (mm.kind !== 'all' && meta.index_status === 'loading instruments' && ++toTries < 6) { $('empty').textContent = 'loading the market list…'; $('empty').className = 'show'; scheduleRetry(); return; }
+        toCombined = false;
+        settled = mm.kind === 'all' || meta.index_status === 'ok';   // a list too slow to arrive: the move is tried again next launch
+      }
       if (!Object.keys(j.keys).length) {
         $('empty').textContent = meta.sync.indexOf('failed') === 0 ? meta.sync : (meta.notice ? meta.notice + ' · ' : '') + (meta.sync === 'backfilling' ? 'first candles arriving…' : 'waiting for the server to load ' + (meta.market.ticker || mk) + '…') +
           (meta.live_err ? ' — last attempt failed: ' + meta.live_err + ' (retrying)' : '');
@@ -257,9 +286,10 @@
         return;
       }
       $('empty').className = '';
-      if (size === null) size = meta.auto_size;
-      else if (meta.sizes.indexOf(size) < 0) size = nearestSize(meta.sizes, size);    // the medians moved since: the closest size left
-      var sel = $('size'); sel.innerHTML = meta.sizes.map(function(s){ return '<option value="' + s + '"' + (s === size ? ' selected' : '') + '>' + fmtD(s) + sizeNote(s) + '</option>'; }).join('');
+      if (size === null || (adaptive(size) && (meta.adaptive || []).indexOf(+size.slice(2)) < 0)) size = meta.auto_size;
+      else if (!adaptive(size) && meta.sizes.indexOf(size) < 0) size = nearestSize(meta.sizes, size);    // the medians moved since: the closest size left
+      var sel = $('size'); sel.innerHTML = '<optgroup label="fixed size">' + meta.sizes.map(function(s){ return '<option value="' + s + '"' + (s === size ? ' selected' : '') + '>' + fmtD(s) + sizeNote(s) + '</option>'; }).join('') + '</optgroup>' +
+        (meta.adaptive ? '<optgroup label="adaptive: follows trading volume">' + meta.adaptive.map(function(k){ var v = 'a:' + k; return '<option value="' + v + '"' + (v === size ? ' selected' : '') + '>≈' + k + (k === 1 ? ' bar' : ' bars') + ' a day</option>'; }).join('') + '</optgroup>' : '');
       var tsel = $('tf'); if (!tsel.options.length) tsel.innerHTML = TF.map(function(t){ return '<option value="' + t + '"' + (t === tf ? ' selected' : '') + '>' + t + '</option>'; }).join('');
       var k = j.keys[key()]; if (!k) { scheduleRetry(); return; }
       bars = k.bars; forming = k.forming; lastFullLoad = Date.now(); save();
@@ -309,12 +339,13 @@
       var html = groups.slice(0, 40).map(function(g){
         var known = g.rows.filter(function(r){ return r.first; }), best = null;
         if (known.length) best = known.reduce(function(a, b){ return (b.first < a.first || (b.first === a.first && b.kind === 'perp' && a.kind !== 'perp')) ? b : a; });
+        var all = 'all:' + g.ticker;
         return '<div class="grp"><div class="gh"><b>' + esc(g.ticker) + '</b><span>' + esc(g.name || '') + (g.stock ? ' · tokenized stock / stock perp' : '') + '</span>' +
-          (known.length ? '<em>since ' + fmtMon(best.first) + '</em>' : '<em>history: press Enter to check</em>') + '</div><div class="gm">' +
+          (known.length ? '<em>Bybit since ' + fmtMon(best.first) + '</em>' : '') + '</div><div class="gm">' +
+          '<button data-key="' + esc(all) + '" class="' + (all === market ? 'cur' : 'best') + '">combined <span class="tag">every exchange that lists it · dollars summed · the first open downloads them</span></button>' +
           g.rows.map(function(r){
-            var cls = (r.key === market ? 'cur' : (best && r.key === best.key ? 'best' : ''));
-            return '<button data-key="' + esc(r.key) + '" class="' + cls + '">' + r.kind + ' ' + esc(r.symbol) +
-              ' <span class="tag">' + (r.first ? 'since ' + fmtMon(r.first) : r.first === 0 ? 'no candles' : 'depth ?') + (best && r.key === best.key ? ' ★ most history' : '') + (r.have ? ' · on disk' : '') + (r.status === 'backfilling' ? ' · downloading' : '') + '</span></button>';
+            return '<button data-key="' + esc(r.key) + '" class="' + (r.key === market ? 'cur' : '') + '">Bybit only: ' + r.kind + ' ' + esc(r.symbol) +
+              ' <span class="tag">' + (r.first ? 'since ' + fmtMon(r.first) : r.first === 0 ? 'no candles' : 'depth ?') + (r.have ? ' · on disk' : '') + (r.status === 'backfilling' ? ' · downloading' : '') + '</span></button>';
           }).join('') + '</div></div>';
       }).join('');
       if (!v && j.pending) html += '<div class="hint">' + j.pending + ' markets still to be depth-checked in the background</div>';
@@ -384,11 +415,11 @@
       if (e.key !== 'Enter') return;
       e.preventDefault();
       var v = this.value.trim();
-      if (!v && lastRows.length) { go(lastRows[0].key); return; }
+      if (!v && lastRows.length) { go('all:' + lastRows[0].ticker); return; }
       if (!v) return;
-      $('res').innerHTML = '<div class="hint">checking which market has the most history…</div>';
+      $('res').innerHTML = '<div class="hint">looking it up…</div>';
       fetch('/pick?t=' + encodeURIComponent(v)).then(function(r){ return r.json(); }).then(function(j){
-        if (j.key) go(j.key); else $('res').innerHTML = '<div class="hint">' + (j.status && j.status !== 'ok' ? esc(j.status) : 'nothing on Bybit called "' + esc(v) + '"') + '</div>';
+        if (j.key) go(j.key); else $('res').innerHTML = '<div class="hint">' + (j.status && j.status !== 'ok' ? esc(j.status) : 'no exchange lists "' + esc(v) + '"') + '</div>';
       }).catch(function(){ $('res').innerHTML = '<div class="hint">server not answering</div>'; });
     };
     $('star').onclick = function(){
@@ -402,7 +433,7 @@
     $('bannerBtn').onclick = runUpdate;
     $('bDollar').onclick = function(){ switchTo('dollar'); };
     $('bTime').onclick = function(){ switchTo('time'); };
-    $('size').onchange = function(){ size = +this.value; this.blur(); save(); load(true); };   // blur: the keys go back to the chart
+    $('size').onchange = function(){ size = this.value.indexOf('a:') === 0 ? this.value : +this.value; this.blur(); save(); load(true); };   // blur: the keys go back to the chart
     $('tf').onchange = function(){ tf = this.value; this.blur(); save(); load(true); };
     if (mode === 'time') { $('bDollar').className = ''; $('bTime').className = 'on'; $('lSize').style.display = 'none'; $('lTf').style.display = ''; }
     $('bSettings').onclick = function(){ settings.open(); };
