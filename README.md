@@ -14,9 +14,11 @@ amount of market activity. TradingView does not draw them, so this does.
   low and close is the dollar-weighted median of the exchanges that traded it, so one exchange's bad print
   cannot move the chart. History goes back as far as the oldest exchange (BTC: Bitfinex 2013). A market an
   exchange lists under the same ticker but for another coin is left out (latest price more than 10% off
-  Bybit's), and so is history from before an exchange handed the symbol to this coin (a 14-day gap, a 4x
-  price jump in a day that Bybit did not make, or three days more than 30% off Bybit's price). The header
-  says how many exchanges and markets are in; hover it for the list.
+  Bybit's), and so is history from before an exchange handed the symbol to this coin (a gap of 14+ days
+  across which the price does not carry on, a 4x price jump in a day that Bybit did not make, or three days
+  within a month more than 30% off Bybit's price). A gap where the price does carry on is only missing data
+  (Bitfinex has no BTC minutes for April-May 2016): the history before it stays. The header says how many
+  exchanges and markets are in; hover it for the list.
 * **Any ticker.** Type `PUMP`, `HYPE`, `NVDA`… Enter opens the combined chart; the picker also lists each
   Bybit spot/perp market on its own, with how far back it goes.
 * **Free data, no keys:** public 1-minute candles with exchange-reported turnover (Coinbase and Bitfinex

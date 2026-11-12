@@ -66,6 +66,7 @@ REBUILD_S = 300                                                  # a combined ma
 PRICE_BAND = 0.10                                                # a series whose price is further than this from the reference is another coin
 LIVE_GAP_S = 100                                                 # an exchange unanswered this long missed minutes its 3-minute poll no longer covers
 STALE_PRICE_S = 3600                                             # the price check ignores a last candle older than this (a quiet pair)
+REPLAN_S = 3600                                                  # an exchange's missing market list is asked for again after this
 RESYNC_S = 900                                                   # a combined market with a failed exchange tries it (only it) again after this
 CACHE_REFRESH_DAYS = 7                                           # the merge cache is rewritten once the days merged on top of it reach this
 POOL = ThreadPoolExecutor(12, thread_name_prefix="live")         # the combined markets' live polls, all exchanges at once
@@ -732,8 +733,8 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
             m.retry_at = time.time() + 5
             return
         planned, missing = plan_all(ticker)
-        known = {s["label"] for s in m.venues or []}
-        fresh = [s for s in planned if s["label"] not in known]
+        have = {(s["venue"], s["kind"]) for s in m.venues or []}
+        fresh = [s for s in planned if (s["venue"], s["kind"]) not in have]   # one spot + one perp per exchange, first pick kept
         if m.venues is None and not planned:
             if missing:                                          # the exchanges' lists did not arrive (network?): ask again soon
                 m.sync, m.retry_at = "queued", time.time() + 60
@@ -764,7 +765,7 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
         groups.setdefault(s["venue"], []).append(s)
     if only_failed and not groups:
         m.sync = "live"
-        m.resync_at = time.time() + RESYNC_S if m.replan else 0.0
+        m.resync_at = time.time() + REPLAN_S if m.replan else 0.0
         return
 
     def run(series):
@@ -811,7 +812,7 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
             m.live_rows = {}
             m.live_ok = {s["label"]: time.time() for s in m.venues if s["status"] == "done"}
             m.live_stale = False
-            m.resync_at = time.time() + RESYNC_S if failed or m.replan else 0.0
+            m.resync_at = time.time() + (RESYNC_S if failed else REPLAN_S) if failed or m.replan else 0.0
             n_done = sum(1 for s in m.venues if s["status"] == "done")
             log(f"{m.key}: live with {m.cd.n:,} merged minutes from {n_done} series" + (f", {len(failed)} failed" if failed else ""))
 
@@ -896,6 +897,8 @@ def watch_job(ticker: str) -> None:
             STATE["watch_done"].add(ticker)
             return
     sync_all(m, ("watch", ticker), build=m.cd is not None)
+    if m.venues is None and not m.sync.startswith("failed") and m.retry_at > time.time():
+        STATE["bg_retry_at"] = max(STATE["bg_retry_at"], m.retry_at)   # the exchanges' lists did not load: ask again later
     if m.venues is not None and not any(s["status"] in ("paused", "queued", "syncing") for s in m.venues):
         STATE["watch_done"].add(ticker)
     if m.sync.startswith("failed"):

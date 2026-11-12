@@ -154,8 +154,27 @@ def test_trust_drops_a_relisted_past_and_another_coins_history():
     assert len(C.trust(renamed, C.daily_close(real))) == len(renamed)
     assert len(C.trust(renamed, None, jumps=False)) == len(renamed)
     relisted = pd.concat([same.iloc[:5 * 1440], same.iloc[25 * 1440:]])   # a 20-day hole: delisted, listed again
-    kept = C.trust(relisted, None)
-    assert kept["ts"].iloc[0] == T0 + 25 * 1440 * M
+    relisted.iloc[:5 * 1440, 1:5] *= 3                               # ... and before it, the symbol was another coin at 3x
+    assert C.trust(relisted, None)["ts"].iloc[0] == T0 + 25 * 1440 * M
+    assert C.trust(relisted, C.daily_close(ref))["ts"].iloc[0] == T0 + 25 * 1440 * M
+
+
+def test_trust_keeps_history_across_an_exchanges_data_hole():
+    ref = series(T0, 120 * 1440, px=100, seed=16)
+    holed = pd.concat([ref.iloc[:30 * 1440], ref.iloc[91 * 1440:]])    # 61 days of no data (Bitfinex BTC, 2016-04..05)
+    assert len(C.trust(holed, None)) == len(holed)                  # the price carried on across it
+    assert len(C.trust(holed, C.daily_close(ref))) == len(holed)
+    up = ref.copy()                                                  # the coin rose 3x during the hole, the reference too
+    up.loc[up["ts"] >= T0 + 60 * V.DAY, ["open", "high", "low", "close"]] *= 3
+    holed = pd.concat([up.iloc[:30 * 1440], up.iloc[91 * 1440:]])
+    assert len(C.trust(holed, C.daily_close(up))) == len(holed)     # the reference made the move: same coin
+    assert C.trust(holed, None)["ts"].iloc[0] == T0 + 91 * V.DAY    # no reference: a 3x move across a hole is not trusted
+    down = pd.concat([ref.iloc[:30 * 1440], ref.iloc[91 * 1440:]])  # another coin at 4x+ before the hole: cut at the hole, not a day later
+    down.iloc[:30 * 1440, 1:5] *= 5
+    assert C.trust(down, None)["ts"].iloc[0] == T0 + 91 * V.DAY
+    near = pd.concat([ref.iloc[:30 * 1440], ref.iloc[91 * 1440:]])  # another coin before the hole, priced within 2x
+    near.iloc[:30 * 1440, 1:5] *= 1.5
+    assert C.trust(near, C.daily_close(ref))["ts"].iloc[0] == T0 + 91 * V.DAY
 
 
 def test_forward_sync_pages_flushes_resumes_and_catches_up():

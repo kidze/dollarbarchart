@@ -10,11 +10,11 @@
 
   var P = {}, LS = false; try { P = JSON.parse(localStorage.getItem('dollarbars') || '{}'); LS = true; } catch (e) {}
   var market = (location.hash || '').slice(1) || P.market || 'all:BTC';
-  var toCombined = LS && !P.combined, toTries = 0;              // once: a Bybit-only chart saved by an older version opens as its combined chart
+  var toCombined = LS && !P.combined, toTries = 0, settled = !toCombined;   // once: a Bybit-only chart saved by an older version opens as its combined chart
   var mode = P.mode || 'dollar', sizes = P.sizes || {}, size = sizes[market] || null, tf = P.tf || '1D', logScale = !!P.log;
   var meta = null, bars = [], forming = null, byTime = {}, loading = false, retryTimer = null, restarting = false, update = null;
   var lastFullLoad = 0, qTimer = null, lastRows = [], seq = 0;
-  var save = function(){ sizes[market] = size; try { localStorage.setItem('dollarbars', JSON.stringify({market:market, mode:mode, sizes:sizes, tf:tf, log:logScale, combined:1})); } catch (e) {} };
+  var save = function(){ sizes[market] = size; try { localStorage.setItem('dollarbars', JSON.stringify({market:market, mode:mode, sizes:sizes, tf:tf, log:logScale, combined:settled ? 1 : 0})); } catch (e) {} };
   var fmtD = function(x){ return x >= 1e9 ? '$' + (x >= 1e10 ? (x/1e9).toFixed(0) : (x/1e9).toFixed(1)) + 'B' : x >= 1e6 ? '$' + (x >= 1e7 ? (x/1e6).toFixed(0) : (x/1e6).toFixed(1)) + 'M' : x >= 1e4 ? '$' + Math.round(x/1e3) + 'K' : x >= 1e3 ? '$' + (x/1e3).toFixed(1) + 'K' : '$' + Math.round(x); };
   var fmtP = function(p){ if (p < 0) return '-' + fmtP(-p); if (p >= 1000) return p.toLocaleString('en-US',{maximumFractionDigits:0}); if (p >= 1) return p.toFixed(p >= 100 ? 1 : 2); if (!(p > 0)) return String(p); return p.toFixed(Math.min(20, 3 - Math.floor(Math.log10(p)))); };
   var fmtT = function(t){ return new Date(t*1000).toISOString().slice(0,16).replace('T',' ') + 'Z'; };
@@ -271,11 +271,13 @@
       if (kk !== key()) { moved = true; return; }                           // a menu change meanwhile: this answer holds the old set only
       if (j.error) { setStatus({sync:'error'}, j.error); $('empty').textContent = j.error; $('empty').className = 'show'; return; }
       meta = j.meta; setStatus(meta); setTicker(meta.market); checkUpdate(meta);
-      if (toCombined && meta.market && meta.market.kind !== 'all') {
-        if (meta.market.found) { toCombined = false; go('all:' + meta.market.ticker); return; }
-        if (meta.index_status === 'loading instruments' && ++toTries < 6) { $('empty').textContent = 'loading the market list…'; $('empty').className = 'show'; scheduleRetry(); return; }
+      if (toCombined) {
+        var mm = meta.market || {};
+        if (mm.kind !== 'all' && mm.found) { toCombined = false; settled = true; go('all:' + mm.ticker); return; }
+        if (mm.kind !== 'all' && meta.index_status === 'loading instruments' && ++toTries < 6) { $('empty').textContent = 'loading the market list…'; $('empty').className = 'show'; scheduleRetry(); return; }
+        toCombined = false;
+        settled = mm.kind === 'all' || meta.index_status === 'ok';   // a list too slow to arrive: the move is tried again next launch
       }
-      toCombined = false;
       if (!Object.keys(j.keys).length) {
         $('empty').textContent = meta.sync.indexOf('failed') === 0 ? meta.sync : (meta.notice ? meta.notice + ' · ' : '') + (meta.sync === 'backfilling' ? 'first candles arriving…' : 'waiting for the server to load ' + (meta.market.ticker || mk) + '…') +
           (meta.live_err ? ' — last attempt failed: ' + meta.live_err + ' (retrying)' : '');

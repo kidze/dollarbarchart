@@ -19,7 +19,8 @@ COLS = X.COLS
 PX = ("open", "high", "low", "close")
 DAY = 86_400_000
 CHUNK = 250_000
-RELIST_GAP = 14 * DAY                                            # a hole this long = delisted and listed again: keep what follows it
+RELIST_GAP = 14 * DAY                                            # a hole this long may be a delisting and a listing again ...
+RELIST_MOVE = 2.0                                                # ... it is, when the price across it moved more than this (no reference to ask)
 MISMATCH = 0.30                                                  # a day whose close is this far from the reference's is another coin
 MISMATCH_DAYS, MISMATCH_SPAN = 3, 30 * DAY                       # ... once this many such days fall within this span
 JUMP = 4.0                                                       # a day whose price is this many times the day before's: another coin took the symbol
@@ -102,7 +103,10 @@ def daily_close(f: pd.DataFrame) -> pd.Series:
 
 def trust(f: pd.DataFrame, ref_daily=None, jumps: bool = True) -> pd.DataFrame:
     """The part of a venue's series that is the same coin as the reference:
-    - nothing before a relisting gap (RELIST_GAP without a candle);
+    - nothing before a relisting: a hole of RELIST_GAP or more without a candle across which the price does not
+      carry on (it moved unlike the reference over the same days, by more than MISMATCH; with no reference
+      there, by more than RELIST_MOVE times). Exchanges also just lack data for weeks (Bitfinex has no BTC
+      minutes for April-May 2016): the history before such a hole is kept;
     - nothing up to and including a day whose price is JUMP times (or 1/JUMP) the venue's previous day with
       candles, unless the reference moved the same way over the same days: exchanges hand a symbol to a new
       coin without a gap (Binance's LITUSDT perp was Litentry until 2025-12-23, then Lighter at 6x the price;
@@ -114,14 +118,27 @@ def trust(f: pd.DataFrame, ref_daily=None, jumps: bool = True) -> pd.DataFrame:
     if not len(f):
         return f
     ts = f["ts"].to_numpy(np.int64)
-    gaps = np.flatnonzero(np.diff(ts) > RELIST_GAP)
-    cut = int(ts[gaps[-1] + 1]) if len(gaps) else None
     mine = daily_close(f)
+    cut = None
+    holes = np.flatnonzero(np.diff(ts) > RELIST_GAP)
+    for g in holes[::-1]:                                        # the newest hole that is a relisting cuts
+        before, after = int(ts[g]) // DAY * DAY, int(ts[g + 1]) // DAY * DAY
+        r = mine.loc[after] / mine.loc[before]
+        if ref_daily is not None and before in ref_daily.index and after in ref_daily.index:
+            moved_alike = abs(np.log(r * ref_daily.loc[before] / ref_daily.loc[after])) <= np.log(1 + MISMATCH)
+        else:
+            moved_alike = 1 / RELIST_MOVE <= r <= RELIST_MOVE
+        if not moved_alike:
+            cut = int(ts[g + 1])
+            break
     if jumps and len(mine) > 1:
         days, px = mine.index.to_numpy(np.int64), mine.to_numpy(float)
         step = px[1:] / px[:-1]
+        across = {int(ts[g + 1]) // DAY * DAY for g in holes}    # the first day after a long hole: judged above
         for i in np.flatnonzero((step > JUMP) | (step < 1 / JUMP)):
             before, day, r = int(days[i]), int(days[i + 1]), step[i]   # (before = the venue's previous day: holes happen)
+            if day in across:
+                continue
             if ref_daily is not None and day in ref_daily.index and before in ref_daily.index:
                 rr = ref_daily.loc[day] / ref_daily.loc[before]
                 if (rr > 2) == (r > 1) and (rr > 2 or rr < 0.5):  # the reference made the same move: a real one
