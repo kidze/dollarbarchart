@@ -24,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
-DATA = HERE / "data"
+DATA = Path(os.environ.get("DOLLARBARS_DATA") or HERE / "data")   # a dev copy can point at its own folder
 API = "https://api.bybit.com/v5/market/kline"
 COLS = ["ts", "open", "high", "low", "close", "volume", "turnover"]
 CATEGORIES = ("spot", "linear")
