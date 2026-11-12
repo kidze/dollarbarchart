@@ -64,7 +64,8 @@ DEFAULT_MARKET = "all:BTC"
 CORE = ["server.py", "bars.py", "bybit_sync.py", "markets.py", "userdata.py", "venues.py", "combined.py", "index.html", "lightweight-charts.js"]
 REBUILD_S = 300                                                  # a combined market is re-merged this often while its history downloads
 PRICE_BAND = 0.10                                                # a series whose price is further than this from the reference is another coin
-RESYNC_S = 300                                                   # a combined market with a failed exchange tries it again after this
+RESYNC_S = 900                                                   # a combined market with a failed exchange tries it (only it) again after this
+CACHE_REFRESH_DAYS = 7                                           # the merge cache is rewritten once the days merged on top of it reach this
 POOL = ThreadPoolExecutor(12, thread_name_prefix="live")         # the combined markets' live polls, all exchanges at once
 STATIC = HERE / "static"
 PAGE_TYPES = {".js": "application/javascript", ".css": "text/css"}
@@ -100,6 +101,7 @@ class Market:
         self.live_rows = {}                                      # all:<T> only: label -> {minute: newest row seen live}
         self.built_at = 0.0                                      # all:<T> only: when the merged series was last rebuilt
         self.resync_at = 0.0                                     # all:<T> only: an exchange failed, try again after this
+        self.retry_failed = False                                # all:<T> only: the next sync retries just the failed exchanges
 
     @property
     def combined(self) -> bool:
@@ -452,7 +454,8 @@ def preempted(job) -> bool:
 
 def sync_market(m: Market, job) -> None:
     if m.combined:
-        return sync_all(m, job)
+        only, m.retry_failed = m.retry_failed, False
+        return sync_all(m, job, only_failed=only)
     if m.cd is None:
         m.sync = "loading"
         try:
@@ -643,11 +646,16 @@ def merged_frame(m: Market) -> pd.DataFrame:
     except Exception as e:
         log(f"{m.key}: merge cache unusable ({type(e).__name__}), merging everything")
         base = None
+    complete = all(s["status"] == "done" or s["status"].startswith("absent") for s in m.venues)
+    today = int(time.time() * 1000) // C.DAY * C.DAY
     if base is not None:
-        return pd.concat([base, C.merge(frames, since=cut)], ignore_index=True)
-    merged = C.merge(frames)
-    if all(s["status"] == "done" or s["status"].startswith("absent") for s in m.venues):
-        cut = int(time.time() * 1000) // C.DAY * C.DAY           # complete days only: today keeps changing
+        merged = pd.concat([base, C.merge(frames, since=cut)], ignore_index=True)
+        if not (complete and today - cut >= CACHE_REFRESH_DAYS * C.DAY):
+            return merged
+    else:
+        merged = C.merge(frames)
+    if complete:
+        cut = today                                              # complete days only: today keeps changing
         try:
             head = merged[merged["ts"] < cut]
             X.write_durably(cp, lambda fh: head.to_parquet(fh, index=False))
@@ -702,11 +710,12 @@ def sync_part(m: Market, s: dict, stop) -> None:
     s["status"] = "paused" if res["result"] == "stopped" else "done"
 
 
-def sync_all(m: Market, job, build: bool = True) -> None:
+def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> None:
     """Every exchange at once (each one's series one after another, inside its rate limits), then merge.
     While a long first download runs the chart is re-merged every REBUILD_S so it keeps growing. A series
     that fails is retried after RESYNC_S; one an exchange does not have is left out for good.
-    build=False (the background watchlist job): download only, the merge happens when the chart is opened."""
+    build=False (the background watchlist job): download only, the merge happens when the chart is opened.
+    only_failed: the retry of exchanges that failed last time; the others are left alone (no re-merge unless one recovers)."""
     _, ticker = parse_key(m.key)
     stop = lambda: preempted(job)
     if m.venues is None:
@@ -728,9 +737,13 @@ def sync_all(m: Market, job, build: bool = True) -> None:
         m.live_err = ""
     groups = {}
     for s in m.venues:
-        if not s["status"].startswith("absent"):
-            s["status"] = "queued"
-            groups.setdefault(s["venue"], []).append(s)
+        if s["status"].startswith("absent") or (only_failed and not s["status"].startswith("failed")):
+            continue
+        s["status"] = "queued"
+        groups.setdefault(s["venue"], []).append(s)
+    if only_failed and not groups:
+        m.sync = "live"
+        return
 
     def run(series):
         for s in series:
@@ -751,12 +764,14 @@ def sync_all(m: Market, job, build: bool = True) -> None:
                 m.updated = time.time()
             if not pending:
                 break
-            if build and any(s.get("grew") for s in live) and time.time() - m.built_at > REBUILD_S:
-                rebuild_all(m)
+            if build and any(s.get("grew") for s in live) and (time.time() - m.built_at > REBUILD_S or
+                                                               (m.sets is None and any(s["status"] == "done" and s.get("n") for s in live))):
+                rebuild_all(m)                                   # (an empty chart shows as soon as the first exchange is in)
         for f in futs:
             f.result()
     failed = [s for s in m.venues if s["status"].startswith("failed")]
-    if build and not stop():
+    recovered = only_failed and any(s["status"] == "done" for g in groups.values() for s in g)
+    if build and not stop() and (recovered or not only_failed):
         rebuild_all(m)
     for s in m.venues:
         s.pop("grew", None)
@@ -916,6 +931,7 @@ def live_loop() -> None:
                 continue
             if m.combined and m.resync_at and now > m.resync_at:  # an exchange failed last time: the worker tries it again
                 m.resync_at = 0.0
+                m.retry_failed = True
                 m.sync = "backfilling"
                 continue
             try:
@@ -1138,7 +1154,7 @@ class H(http.server.BaseHTTPRequestHandler):
 def migrate() -> None:
     """v2 kept one file, data/bybit_btcusdt_1m.parquet; give it its v3 name."""
     old = X.DATA / "bybit_btcusdt_1m.parquet"
-    new = X.path(DEFAULT_MARKET)
+    new = X.path("linear:BTCUSDT")
     if old.exists() and not new.exists():
         old.rename(new)
         log(f"renamed {old.name} -> {new.name}")
