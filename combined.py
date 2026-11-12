@@ -21,6 +21,7 @@ DAY = 86_400_000
 CHUNK = 250_000
 RELIST_GAP = 14 * DAY                                            # a hole this long = delisted and listed again: keep what follows it
 MISMATCH = 0.30                                                  # a day whose close is this far from the reference's is another coin
+JUMP = 4.0                                                       # a day whose price is this many times the day before's: another coin took the symbol
 
 
 def _empty() -> pd.DataFrame:
@@ -98,18 +99,31 @@ def daily_close(f: pd.DataFrame) -> pd.Series:
     return f.groupby(f["ts"].to_numpy(np.int64) // DAY * DAY)["close"].median()
 
 
-def trust(f: pd.DataFrame, ref_daily=None) -> pd.DataFrame:
-    """The part of a venue's series that is the same coin as the reference: nothing before a relisting gap,
-    nothing up to the last day whose price is more than MISMATCH away from the reference's, once three or more
-    days are (another coin under the same ticker, or a redenomination; one wild day is not enough). Days the
-    reference does not cover are kept."""
+def trust(f: pd.DataFrame, ref_daily=None, jumps: bool = True) -> pd.DataFrame:
+    """The part of a venue's series that is the same coin as the reference:
+    - nothing before a relisting gap (RELIST_GAP without a candle);
+    - nothing up to and including a day whose price is JUMP times (or 1/JUMP) the day before's, unless the
+      reference moved the same way that day: exchanges hand a symbol to a new coin without a gap (Binance's
+      LITUSDT perp was Litentry until 2025-12-23, then Lighter at 6x the price; PUMPUSDT changed coins on
+      2025-07-10 at a tenth);
+    - nothing up to the last day whose price is more than MISMATCH away from the reference's, once three or more
+      days are (another coin under the same ticker, or a redenomination; one wild day is not enough).
+    Days the reference does not cover are otherwise kept. jumps=False for the reference itself."""
     if not len(f):
         return f
     ts = f["ts"].to_numpy(np.int64)
     gaps = np.flatnonzero(np.diff(ts) > RELIST_GAP)
     cut = int(ts[gaps[-1] + 1]) if len(gaps) else None
+    mine = daily_close(f)
+    if jumps and len(mine) > 1:
+        step = (mine / mine.shift(1)).iloc[1:]
+        for day, r in step[(step > JUMP) | (step < 1 / JUMP)].items():
+            if ref_daily is not None and day in ref_daily.index and day - DAY in ref_daily.index:
+                rr = ref_daily.loc[day] / ref_daily.loc[day - DAY]
+                if (rr > 2) == (r > 1) and (rr > 2 or rr < 0.5):  # the reference made the same move: a real one
+                    continue
+            cut = max(cut or 0, int(day) + DAY)
     if ref_daily is not None and len(ref_daily):
-        mine = daily_close(f)
         common = mine.index.intersection(ref_daily.index)
         if len(common):
             ratio = (mine.loc[common] / ref_daily.loc[common]).to_numpy()

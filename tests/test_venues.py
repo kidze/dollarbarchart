@@ -144,6 +144,15 @@ def test_trust_drops_a_relisted_past_and_another_coins_history():
     wild = same.copy()
     wild.loc[wild["ts"].between(T0 + 30 * V.DAY, T0 + 31 * V.DAY - 1), ["open", "high", "low", "close"]] *= 2   # one wild day: kept
     assert len(C.trust(wild, C.daily_close(ref))) == len(same)
+    renamed = same.copy()                                            # no gap: the symbol went to another coin at 6x on day 40
+    renamed.loc[renamed["ts"] >= T0 + 40 * V.DAY, ["open", "high", "low", "close"]] *= 6
+    short_ref = C.daily_close(renamed)[C.daily_close(renamed).index >= T0 + 45 * V.DAY]   # the reference (the new coin) starts after the switch
+    kept = C.trust(renamed, short_ref)
+    assert T0 + 40 * V.DAY < kept["ts"].iloc[0] <= T0 + 42 * V.DAY          # from the first whole day after the switch
+    real = ref.copy()                                                # a real 6x day that the reference made too is kept
+    real.loc[real["ts"] >= T0 + 40 * V.DAY, ["open", "high", "low", "close"]] *= 6
+    assert len(C.trust(renamed, C.daily_close(real))) == len(renamed)
+    assert len(C.trust(renamed, None, jumps=False)) == len(renamed)
     relisted = pd.concat([same.iloc[:5 * 1440], same.iloc[25 * 1440:]])   # a 20-day hole: delisted, listed again
     kept = C.trust(relisted, None)
     assert kept["ts"].iloc[0] == T0 + 25 * 1440 * M

@@ -615,7 +615,7 @@ def merged_frame(m: Market) -> pd.DataFrame:
     ref_daily = C.daily_close(ref) if ref is not None else None
     frames, labels = [], []
     for s, f in loaded:
-        kept = C.trust(f, None if f is ref else ref_daily)
+        kept = C.trust(f, None, jumps=False) if f is ref else C.trust(f, ref_daily)
         if len(kept) == len(f):
             s["note"] = ""
         elif not len(kept):
