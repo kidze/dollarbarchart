@@ -796,6 +796,8 @@ class Kraken(Venue):
                 if t <= after_ms:
                     continue
                 v, c = float(x[5]), float(x[4])
+                if v <= 0:                                       # (the files hold traded minutes only; a padding row would be stored)
+                    continue
                 chunk.append([t, float(x[1]), float(x[2]), float(x[3]), c, v, v * c])
                 if len(chunk) >= self.CHUNK:
                     yield chunk
@@ -842,7 +844,7 @@ class Kraken(Venue):
         now = int(time.time() * 1000)
         if start_ms >= now - self.OHLC_SPAN:
             return [r for r in self._ohlc(symbol, start_ms, stop) if start_ms <= r[0] <= end_ms]
-        trades, since = [], int(start_ms) * 1_000_000
+        trades, since = [], int(start_ms) * 1_000_000 - 1         # since is exclusive: a trade at start_ms is kept
         while not (stop and stop()):
             page, nxt = self._trades(symbol, since, stop)
             trades.extend(x for x in page if start_ms <= x[0] <= end_ms)
@@ -1114,8 +1116,9 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
             side["history_done"] = True                          # forward venues start at the first candle
             span = max(1, now_ms - first)
             if hasattr(venue, "stream") and not side.get("stream_done"):   # a venue's archive first (Kraken), resumable
-                streamed = None
-                for chunk in venue.stream(symbol, int(frame["ts"].iloc[-1]) if len(frame) else -1, stop=stop):
+                streamed = None                                  # from where a stopped stream got to; a file the stream did
+                for chunk in venue.stream(symbol, int(side.get("stream_at", -1)), stop=stop):   # not write streams all
+                    side["stream_at"] = int(chunk[-1][0])        # (set before take: a flush saves it with the rows)
                     take(chunk)
                     streamed = chunk[-1][0]
                     if progress:
@@ -1125,8 +1128,8 @@ def sync(venue: Venue, symbol: str, on_rows=None, progress=None, stop=None, chec
                 if stop and stop():
                     return finish("stopped")
                 side["stream_done"] = True
-                if streamed is not None:
-                    cursor = max(cursor, streamed + MINUTE)
+                if streamed is not None:                         # the API goes on from the archive's end (a file that
+                    cursor = streamed + MINUTE                   # held newer rows has them fetched again, its gap with them)
             while True:
                 if stop and stop():
                     return finish("stopped")

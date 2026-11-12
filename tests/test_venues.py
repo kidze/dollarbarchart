@@ -710,9 +710,21 @@ def test_kraken_trades_become_minutes_and_a_window_moves_past_a_quiet_tail():
     set_now(t + 10 * V.DAY)
     end = t + 1440 * M - 1
     rows = k.fetch("XBTUSD", t, end)
-    assert calls[0] == t * 1_000_000 and len(calls) == 2             # paged until the trades ran past nothing more
+    assert calls[0] == t * 1_000_000 - 1 and len(calls) == 2         # since is exclusive; paged until the trades ran out
     assert rows[0][0] == t and rows[-1] == [end // M * M, rows[-2][4], rows[-2][4], rows[-2][4], rows[-2][4], 0.0, 0.0]
     assert all(r[5] > 0 for r in rows[:-1]) and sum(r[5] for r in rows) == 1003.0
+
+
+def test_a_file_the_archive_did_not_write_is_streamed_from_the_start():
+    """A Kraken file holding only newer API rows (its side file lost, say): the archive is streamed whole, not
+    from the file's newest minute, so the history before it arrives (the review's case)."""
+    scratch()
+    full = series(T0, 900, seed=21)
+    v = FakeArchive(full, int(full["ts"].iloc[-1]), full.iloc[:600])
+    V.save("fake", "P", full.iloc[700:].reset_index(drop=True))
+    res = V.sync(v, "P")
+    assert v.streams == [-1] and res["result"] == "done" and V.load_side("fake", "P")["stream_done"]
+    assert V.load("fake", "P")["ts"].tolist() == full["ts"].tolist()     # the gap between the archive and the file too
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
