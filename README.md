@@ -10,19 +10,25 @@ amount of market activity. TradingView does not draw them, so this does.
 ![BTC dollar bars](docs/screenshot.png)
 
 * **Combined across exchanges (the default).** A ticker's chart is every exchange that lists it, spot and
-  perpetual: Binance, Bybit, OKX, Coinbase, KuCoin, Bitfinex. Dollars are summed; each minute's open, high,
-  low and close is the dollar-weighted median of the exchanges that traded it, so one exchange's bad print
-  cannot move the chart. History goes back as far as the oldest exchange (BTC: Bitfinex 2013). A market an
+  perpetual: Binance, Bybit, OKX, Coinbase, Bitstamp, KuCoin, Bitfinex. Dollars are summed; each minute's open,
+  high, low and close is the dollar-weighted median of the exchanges that traded it, so one exchange's bad print
+  cannot move the chart. A price 2x away from the minutes around it that no second exchange shows within a
+  minute is a bad print even when nobody can outvote it (Bitfinex sold BTC at $0.01 in April 2013, when it was
+  the only exchange trading): it takes the other exchanges' price, or the candle's body when there are none.
+  A crash every exchange shows stays. History goes back as far as the oldest exchange (BTC: Bitstamp 2011). A market an
   exchange lists under the same ticker but for another coin is left out (latest price more than 10% off
   Bybit's), and so is history from before an exchange handed the symbol to this coin (a gap of 14+ days
   across which the price does not carry on, a 4x price jump in a day that Bybit did not make, or three days
   within a month more than 30% off Bybit's price). A gap where the price does carry on is only missing data
-  (Bitfinex has no BTC minutes for April-May 2016): the history before it stays. The header says how many
-  exchanges and markets are in; hover it for the list.
+  (Bitfinex has no BTC minutes for April-May 2016): the history before it stays, and the hours an exchange
+  serves no minutes for are filled from its 5-minute or hourly candles where it has them (Bitfinex BTC
+  2014-11/12, 2015-05, 2016-04/05; ETH 2016-04/05). Coinbase's minutes go back to its opening day 2015-01-26
+  and Binance's oldest perps to their listing (BTC 2019-09), before the archive starts. The header says how
+  many exchanges and markets are in; hover it for the list.
 * **Any ticker.** Type `PUMP`, `HYPE`, `NVDA`… Enter opens the combined chart; the picker also lists each
   Bybit spot/perp market on its own, with how far back it goes.
-* **Free data, no keys:** public 1-minute candles with exchange-reported turnover (Coinbase and Bitfinex
-  report coin volume, so their dollars are volume × close), from each market's first trade to the current
+* **Free data, no keys:** public 1-minute candles with exchange-reported turnover (Coinbase, Bitstamp and
+  Bitfinex report coin volume, so their dollars are volume × close), from each market's first trade to the current
   minute, polled every 5 s so the forming bar moves. Binance's history comes from its public archive
   (data.binance.vision, one file per month) and its live minutes from its websocket stream, so the app adds
   almost nothing to the request weight other Binance users on the same machine spend. Binance's archive is
@@ -30,9 +36,10 @@ amount of market activity. TradingView does not draw them, so this does.
 * Bar sizes from a tenth of the market's median day to ten times it, plus the median 1h, 4h, week and month
   (last 365 days, whole UTC periods with trades), each labelled in the menu, plus ordinary time bars
   (1h, 4h, 1D, 1W, 1M) on the same chart for comparison.
-* **Adaptive sizes** (≈24, ≈6 or ≈1 bar a day): each bar's size is the median day of the 30 days before it
-  divided by the target, so a coin whose trading grew 100x keeps a steady number of bars through its whole
-  history instead of squashing its early years into a handful of bars. Only past days set a size.
+* **Adaptive sizes** (≈24, ≈6 or ≈1 bar a day): each bar's size is the median of the 30 days with trades
+  before it, divided by the target, so a coin whose trading grew 100x keeps a steady number of bars through its
+  whole history instead of squashing its early years into a handful of bars. Only past days set a size; days
+  without any candle (a hole in the data, a halted market) are skipped, not counted as $0.
 * TradingView-style chart (Lightweight Charts): drag the price or time axis to zoom, double-click to reset,
   `A` auto-scale and `L` log-scale buttons, OHLC + bar duration + dollars on hover, bar statistics in the
   header (count, median / fastest / slowest bar, busiest and quietest month, last 365 days, forming bar).
@@ -103,8 +110,8 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 |---|---|
 | `bybit_sync.py` | keyless Bybit v5 kline requests; one parquet per market; streaming, resumable, checkpointed backfill that stops within one request when asked |
 | `markets.py` | instrument index (cached daily), ticker aliases (PUMPFUN → PUMP, NVDAX → NVDA), search ranking, deepest-history choice, watchlist file |
-| `venues.py` | the other exchanges' 1-minute candles (Binance archive + REST + websocket, OKX, Coinbase, KuCoin, Bitfinex, and Bybit wrapped alike); one parquet per series in `data/<exchange>_<symbol>.parquet`; resumable syncs; which market means a ticker on each exchange |
-| `combined.py` | the merge (dollars summed, dollar-weighted median prices) and the same-coin history check |
+| `venues.py` | the other exchanges' 1-minute candles (Binance archive + REST + websocket, OKX, Coinbase, Bitstamp, KuCoin, Bitfinex with its coarser candles for minute holes, and Bybit wrapped alike); one parquet per series in `data/<exchange>_<symbol>.parquet`; resumable syncs; which market means a ticker on each exchange |
+| `combined.py` | the merge (dollars summed, dollar-weighted median prices), the repair of bad prints no second exchange confirms, and the same-coin history check |
 | `bars.py` | dollar bars and time bars from the candles, incrementally as new minutes arrive; per-market size menu |
 | `server.py` | local HTTP server: `/bars?m=&k=` (full history of the set shown), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/drawings?m=`, `/settings`, `/static/…`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |
 | `userdata.py` | saved drawings (per market) and chart settings, written crash-safe like the candles; only the app's own page may change them |

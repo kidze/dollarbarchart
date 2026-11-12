@@ -16,6 +16,7 @@ SIZE_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10]        # dollar sizes offered = the ma
 MEDIAN_TFS = ["1h", "4h", "1W", "1M"]            # also offered: the median hour, 4 hours, week and month
 ADAPTIVE = [24, 6, 1]                            # adaptive sets: about this many bars a day
 ADAPT_DAYS = 30                                  # each day's adaptive size comes from the median of the days before it
+ADAPT_LOOKBACK = 400                             # ... that had trades, looked for this far back (across a hole in the data)
 TIMEFRAMES = ["1h", "4h", "1D", "1W", "1M"]
 MINUTE = 60_000
 DAY = 86_400_000
@@ -99,17 +100,22 @@ def dollar_bars(cd: Candles, size: float, start: int = 0):
 
 
 def day_sizes(cd: Candles, per_day: float, d_from: int, d_to: int) -> dict:
-    """{epoch day: adaptive bar size} for days d_from..d_to: the median turnover of the ADAPT_DAYS complete days
-    before each (from the market's first day on; a day without candles counts as $0), over per_day. The first
-    day has no past: it uses its own total. Never below $1."""
+    """{epoch day: adaptive bar size} for days d_from..d_to: the median turnover of the ADAPT_DAYS most recent
+    days before each that had trades (at most ADAPT_LOOKBACK days back), over per_day. A day without candles is
+    a hole in the data or a halted market, not a $0 day: counted as $0, a month-long hole (Bitfinex has no BTC
+    minutes for December 2014) collapsed the size to $1 and made every minute after it a bar. A day with no
+    such day behind it uses its own total. Never below $1."""
     n = cd.n
     first = int(cd.ts[0] // DAY)
-    lo = max(first, d_from - ADAPT_DAYS)
+    lo = max(first, d_from - ADAPT_DAYS - ADAPT_LOOKBACK)
     i0 = int(np.searchsorted(cd.ts[:n], lo * DAY))
     tot = np.bincount((cd.ts[i0:n] // DAY - lo).astype(np.int64), weights=cd.d[i0:n], minlength=d_to - lo + 1)
+    traded = np.flatnonzero(tot > 0)                 # day offsets from lo that had trades
     out = {}
     for d in range(d_from, d_to + 1):
-        past = tot[max(lo, d - ADAPT_DAYS) - lo:d - lo]
+        k = int(np.searchsorted(traded, d - lo))     # the traded days before d, no further back than the lookback
+        k0 = int(np.searchsorted(traded, d - ADAPT_DAYS - ADAPT_LOOKBACK - lo))
+        past = tot[traded[max(k0, k - ADAPT_DAYS):k]]
         med = float(np.median(past)) if len(past) else float(tot[d - lo])
         out[d] = max(med / per_day, 1.0)
     return out

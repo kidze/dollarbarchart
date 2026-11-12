@@ -180,6 +180,24 @@ def test_adaptive_bars_keep_a_steady_count_while_volume_grows_100x():
     assert meta["adaptive"] == B.ADAPTIVE and all(f"a:{k}" in sets for k in B.ADAPTIVE)
 
 
+
+def test_adaptive_sizes_skip_a_month_without_candles():
+    """A 40-day hole in the data (Bitfinex has no BTC minutes for December 2014): the bars after it keep their
+    size instead of collapsing to $1 and making every minute a bar."""
+    start = 1_700_000_000_000 // DAY_MS * DAY_MS
+    ts = start + np.arange(100 * 1440) * B.MINUTE
+    ts = ts[(ts < start + 40 * DAY_MS) | (ts >= start + 80 * DAY_MS)]
+    d, one = np.full(len(ts), 1e6), np.ones(len(ts))
+    cd = B.Candles(pd.DataFrame({"ts": ts, "open": one, "high": one, "low": one, "close": one, "volume": d, "turnover": d}))
+    bars, _, _ = B.adaptive_bars(cd, 6)
+    per_day = pd.Series(1, index=[b["t"] // 86400 for b in bars]).groupby(level=0).sum()
+    day0 = start // DAY_MS
+    assert per_day.loc[day0 + 1:day0 + 39].between(5, 7).all() and per_day.loc[day0 + 80:day0 + 99].between(5, 7).all()
+    assert all(b["z"] == round(1e6 * 1440 / 6) for b in bars if b["t"] // 86400 > day0)
+    cut = int(np.searchsorted(cd.ts[:cd.n], (day0 + 85) * DAY_MS))  # the live path (from a later start) agrees
+    later, _, _ = B.adaptive_bars(cd, 6, cut)
+    assert later[0]["z"] == round(1e6 * 1440 / 6)
+
 def test_upsert_replaces_same_minute_and_ignores_older():
     df = synthetic(100, seed=4)
     cd = B.Candles(df)
