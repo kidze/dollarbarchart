@@ -9,8 +9,9 @@ merged into one series (combined.py) whose dollars are the sum and whose prices 
 median of the exchanges that traded each minute. One background worker does all downloads,
 in this order: the market on screen, then the daily instrument-list refresh, then first-candle probes for
 the search index, then the watchlist (data/watchlist.json) so those open instantly next time. Nothing
-runs when no window is open: two minutes after the last page request the worker is told to stop,
-everything is written to disk and the process exits; the next launch resumes.
+runs when no window is open: two minutes after the last page request, when no chart window is on the
+screen either (window_open: a hidden or sleeping window asks rarely or never, but it is still there), the
+worker is told to stop, everything is written to disk and the process exits; the next launch resumes.
 
 It also watches its own source files: once they have stopped changing for a minute, /live carries an
 `update` notice and the page shows a banner. "Update now" reloads the page if only the page changed, or
@@ -56,6 +57,8 @@ HERE = Path(__file__).resolve().parent
 PORT = int(os.environ.get("DOLLARBARS_PORT", "8793"))         # a dev checkout runs on another port next to the live app
 POLL_S = 5
 IDLE_EXIT_S = 120
+WINDOW_TITLE = "dollar bars"                                     # the page's title ends with it ("BTC dollar bars")
+BROWSERS = ("msedge.exe", "chrome.exe")                          # the browsers launch.cmd opens the page in
 LOOK_S = 60                                                      # a market counts as "on screen" this long after its last request
 KEEP_LOADED = 3
 WATCH_STALE_S = 86_400
@@ -1084,8 +1087,59 @@ def live_loop() -> None:
                 m.live_err = type(e).__name__
 
 
+def window_open() -> bool:
+    """Is a chart window on the screen (Windows)? A visible top-level window of Edge or Chrome whose title holds
+    the page's ("BTC dollar bars", "... - Microsoft Edge" when it is a tab). Minimized counts; a hidden window
+    does not (Edge keeps hidden windows of closed ones). Edge slows a hidden window's requests to one a minute
+    and stops a sleeping one's altogether, so the requests alone cannot tell an idle window from a closed one."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u, k = ctypes.windll.user32, ctypes.windll.kernel32
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+        k.CloseHandle.argtypes = (wintypes.HANDLE,)
+        u.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+        found = []
+
+        def browser(h) -> bool:
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+            hp = k.OpenProcess(0x1000, False, pid.value)         # PROCESS_QUERY_LIMITED_INFORMATION
+            if not hp:
+                return False
+            try:
+                size, exe = wintypes.DWORD(1024), ctypes.create_unicode_buffer(1024)
+                return bool(k.QueryFullProcessImageNameW(hp, 0, exe, ctypes.byref(size))) and os.path.basename(exe.value).lower() in BROWSERS
+            finally:
+                k.CloseHandle(hp)
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def each(h, _):
+            n = u.GetWindowTextLengthW(h) if u.IsWindowVisible(h) else 0
+            if n:
+                title = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(h, title, n + 1)
+                if WINDOW_TITLE in title.value and browser(h):
+                    found.append(title.value)
+                    return False                                 # (stop: one is enough)
+            return True
+        u.EnumWindows(each, 0)
+        return bool(found)
+    except Exception:                                            # no answer: the requests alone decide, as before
+        return False
+
+
+def should_exit(now: float) -> bool:
+    """Two minutes without a request and no chart window on the screen: nobody is looking."""
+    return now - STATE["last_req"] > IDLE_EXIT_S and not STATE["restarting"] and not window_open()
+
+
 def watchdog() -> None:
-    prev = time.time()
+    prev, quiet = time.time(), False
     last_persist = time.time()
     while True:
         time.sleep(10)
@@ -1101,8 +1155,8 @@ def watchdog() -> None:
         except Exception as e:
             log(f"watchdog: {type(e).__name__}: {e}")
         idle = now - STATE["last_req"]
-        if idle > IDLE_EXIT_S and not STATE["restarting"]:
-            log(f"no page for {int(idle)} s, stopping")
+        if should_exit(now):
+            log(f"no page for {int(idle)} s and no chart window, stopping")
             STATE["stop"] = True
             try:
                 WORKER_DONE.wait(30)
@@ -1110,6 +1164,12 @@ def watchdog() -> None:
             finally:
                 log("exiting")
                 os._exit(0)
+        elif idle > IDLE_EXIT_S and not STATE["restarting"]:
+            if not quiet:                                        # (said once per quiet spell)
+                log(f"no request for {int(idle)} s, but the chart window is open (hidden or asleep): staying")
+            quiet = True
+        else:
+            quiet = False
 
 
 # ---------------------------------------------------------------- HTTP
