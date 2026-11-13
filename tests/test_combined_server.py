@@ -117,6 +117,29 @@ def test_a_window_served_an_older_page_is_told_to_reload():
         S.QUIET_S = old
 
 
+
+def test_the_server_stays_while_a_chart_window_is_open_however_quiet():
+    """A hidden or sleeping window stops asking, but it is still open: no exit while one is on the screen."""
+    import server as S
+    saved = (S.window_open, S.STATE["last_req"], S.STATE["restarting"])
+    try:
+        now = time.time()
+        S.STATE["restarting"] = False
+        S.STATE["last_req"] = now - 30
+        S.window_open = lambda: False
+        assert not S.should_exit(now)                            # asked 30 s ago
+        S.STATE["last_req"] = now - 3600
+        assert S.should_exit(now)                                # an hour quiet, no window: closed
+        S.window_open = lambda: True
+        assert not S.should_exit(now)                            # an hour quiet, window open (asleep): stays
+        S.window_open = lambda: False
+        S.STATE["restarting"] = True
+        assert not S.should_exit(now)                            # a restart hands over itself
+        S.window_open = saved[0]
+        assert S.window_open() in (True, False)                  # the real check answers (False off Windows)
+    finally:
+        S.window_open, S.STATE["last_req"], S.STATE["restarting"] = saved
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

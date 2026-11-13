@@ -71,7 +71,9 @@ amount of market activity. TradingView does not draw them, so this does.
   a solid or gradient background, all with opacity, in a TradingView-style color picker (its palette, your
   own custom colors, an opacity slider). Changes preview live; Cancel puts the chart back.
 * **Nothing runs while the window is closed.** Downloads happen only while the app is open; two minutes
-  after the last page request the server writes what it has to disk and exits. The next launch resumes.
+  after the window is closed the server writes what it has to disk and exits. The next launch resumes. A
+  window left open but hidden, minimized or asleep (Edge slows or stops its requests) keeps the server: it
+  looks for a visible Edge or Chrome window titled "… dollar bars" before it stops.
 * A **watchlist** (☆ next to the ticker) is downloaded in the background while the app is open, so those
   tickers open instantly later. Everything else is fetched the first time you pick it, all exchanges at once,
   and the chart grows while the download runs (a few minutes for a young coin; hours for the full BTC history
