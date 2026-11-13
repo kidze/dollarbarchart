@@ -388,17 +388,23 @@
   }
   function restartNow(){
     if (update.kind === 'reload') { location.reload(); return; }
-    restarting = true; $('bannerText').textContent = 'Restarting the server…'; $('bannerBtn').disabled = true; setStatus({sync:'restarting…'});
-    var oldPid = null, t0 = Date.now(), iv = null;
+    restarting = true; $('bannerText').textContent = 'Restarting the server…'; $('bannerBtn').style.display = 'none'; setStatus({sync:'restarting…'});
+    var oldPid = null, gone = false, t0 = Date.now(), iv = null;
+    var say = function(text){ $('bannerText').textContent = text; };
     fetch('/restart').then(function(r){ return r.json(); }).then(function(j){
       if (j.ok) { oldPid = j.pid; return; }
-      clearInterval(iv); restarting = false; $('bannerBtn').disabled = false; $('bannerText').textContent = 'Not yet: ' + (j.reason || 'try again in a minute');   // files still changing on disk
-    }).catch(function(){});
+      clearInterval(iv); restarting = false; $('bannerBtn').style.display = ''; $('bannerBtn').disabled = false;
+      say('Not yet: ' + (j.reason || 'try again in a minute'));                                        // files still changing on disk
+    }).catch(function(){ gone = true; });   // nobody answered: the server had stopped (it does when this window goes 2 minutes without asking)
     iv = setInterval(function(){
+      var waited = Date.now() - t0;
       fetch('/ping', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(j){
-        if (j.ok && oldPid !== null && j.pid !== oldPid) { clearInterval(iv); location.reload(); }   // the new copy answers: reload onto it
-        else if (Date.now() - t0 > 90000) { clearInterval(iv); $('bannerText').textContent = 'The server did not come back. Close this window and run launch.cmd again.'; }
-      }).catch(function(){});
+        if (j.ok && (oldPid !== null ? j.pid !== oldPid : gone)) { clearInterval(iv); location.reload(); }   // a new copy answers: reload onto it
+        else if (waited > 90000) say('The server did not come back. Close this window and open the app again.');
+      }).catch(function(){                                                                               // still nobody: say so (and keep asking)
+        if (gone && waited > 4000) say('The chart server is not running: it stops by itself when this window has been hidden for a while. Close this window and open the app again (it starts on the new version).');
+        else if (waited > 90000) say('The server did not come back. Close this window and open the app again.');
+      });
     }, 1000);
   }
 
