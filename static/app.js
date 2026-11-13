@@ -1,5 +1,5 @@
 /* The chart page: loads a market's bar sets from the local server, keeps the forming bar live, the ticker picker,
-   watchlist, stats line, hover legend, update banner, and wires the settings dialog (settings.js), the drawing
+   watchlist, hover legend, info panel, update banner, and wires the settings dialog (settings.js), the drawing
    tools (draw.js) and the indicators (indicators.js) to the chart. */
 (function(){
   'use strict';
@@ -25,12 +25,14 @@
   var adaptive = function(s){ return typeof s === 'string' && s.indexOf('a:') === 0; };   // 'a:6' = about 6 bars a day, sized from the 30 days before
   var key = function(){ return mode === 'dollar' ? (adaptive(size) ? size : 'd:' + size) : 't:' + tf; };
   var capOf = function(r){ return adaptive(size) ? r.z : size; };   // the dollars a bar needed to close
-  var sizeText = function(){ return adaptive(size) ? 'adaptive bars (≈' + size.slice(2) + ' a day)' : 'bars of ' + fmtD(size); };
-  var MEDIAN = [['1h','median 1h'], ['4h','median 4h'], ['1D','median day'], ['1W','median week'], ['1M','median month']];
+  var sizeLabel = function(s){ return adaptive(s) ? s.slice(2) + ' / day' : fmtD(s); };    // the size button and menu
+  // a size that is the median turnover of an hour, day, week…: one such bar takes about that long
+  var MEDIAN = [['1h','≈ 1 hour'], ['4h','≈ 4 hours'], ['1D','≈ 1 day'], ['1W','≈ 1 week'], ['1M','≈ 1 month']];
   var sizeNote = function(s){
     var md = meta.medians || {'1D': meta.auto_size}, n = MEDIAN.filter(function(m){ return md[m[0]] === s; }).map(function(m){ return m[1]; });
-    return n.length ? ' (' + n.join(', ') + ')' : '';
+    return n.join(', ');
   };
+  var dur = function(sec){ var h = sec / 3600; return h >= 48 ? (h/24).toFixed(1) + 'd' : h >= 1 ? h.toFixed(1) + 'h' : Math.max(1, Math.round(h*60)) + 'm'; };
   var nearestSize = function(list, s){ return list.reduce(function(a, b){ return Math.abs(Math.log(b/s)) < Math.abs(Math.log(a/s)) ? b : a; }); };
   var sameBar = function(a, b){ return a && b && a.t === b.t && a.o === b.o && a.h === b.h && a.l === b.l && a.c === b.c && a.d === b.d; };
 
@@ -176,17 +178,25 @@
     setInterval(function(){ $('bAuto').className = scale.options().autoScale ? 'on' : ''; $('bLog').className = logScale ? 'on' : ''; }, 300);
     $('bLog').className = logScale ? 'on' : '';
 
-    chart.subscribeCrosshairMove(function(p){
-      if (!p || !p.time) return;
-      var r = byTime[p.time]; if (!r) return;
-      var chg = +(((r.c / r.o - 1) * 100).toFixed(2)), isForming = forming && r.t === forming.t;
-      var head = mode === 'dollar'
-        ? '<b>' + fmtT(r.t) + ' → ' + fmtT(r.e) + '</b> · ' + (isForming ? 'forming, ' : 'took ') + '<b>' + fmtHrs((r.e - r.t)/3600) + '</b> (' + r.n + ' min) · ' + fmtD(r.d) + (isForming ? ' of ' + fmtD(capOf(r)) : adaptive(size) ? ' (size ' + fmtD(r.z) + ')' : '') + ' traded'
-        : '<b>' + (tf === '1h' || tf === '4h' ? fmtT(r.t) : fmtDay(r.t)) + '</b> (' + tf + (isForming ? ', forming' : '') + ') · ' + fmtD(r.d) + ' traded';
-      $('lgBar').innerHTML = head + '<br>O ' + fmtP(r.o) + ' · H ' + fmtP(r.h) + ' · L ' + fmtP(r.l) +
-        ' · C ' + fmtP(r.c) + ' · <span style="color:' + (chg >= 0 ? '#2ebd85' : '#f23645') + '">' + (chg > 0 ? '+' : '') + chg.toFixed(2) + '%</span>';
-      ind.hover(r);
+    chart.subscribeCrosshairMove(function(p){                     // over a bar: that bar; anywhere else: the newest
+      var r = p && p.time ? byTime[p.time] : null;
+      hoverT = r ? r.t : null; legend();
     });
+  }
+
+  // Top left of the chart: O H L C and the change, in the bar's color, then how long a dollar bar took (the forming one:
+  // how full it is). The time is on the time axis under the crosshair already.
+  var hoverT = null;
+  function legend(){
+    var h = hoverT !== null ? byTime[hoverT] : null, r = h || forming || bars[bars.length-1], e = $('lgBar');
+    ind.hover(h);
+    if (!r) { e.className = ''; e.innerHTML = ''; return; }
+    var chg = (r.c / r.o - 1) * 100, isForming = forming && r.t === forming.t;
+    var f = function(k, v){ return '<span><em>' + k + '</em>' + fmtP(v) + '</span>'; };
+    var tail = mode === 'dollar' ? (isForming ? Math.min(99, Math.floor(r.d / capOf(r) * 100)) + '% formed' : dur(r.e - r.t)) : isForming ? 'forming' : '';
+    e.className = r.c >= r.o ? 'up' : 'dn';
+    e.innerHTML = f('O', r.o) + f('H', r.h) + f('L', r.l) + f('C', r.c) + '<span>' + (chg > 0 ? '+' : '') + chg.toFixed(2) + '%</span>' +
+      (tail ? '<span class="t">' + tail + '</span>' : '');
   }
 
   // How far you can zoom out: until the whole history fits on screen. Short histories keep the 2 px floor (zooming out further would only add empty space).
@@ -200,59 +210,57 @@
   function candle(r){ return {time:r.t, open:r.o, high:r.h, low:r.l, close:r.c}; }
   function put(r){ series.update(candle(r)); ind.update(r); }      // one new or changed bar, to the candles and the indicators
   function precisionFor(px){ var p = px >= 1000 ? 0 : px >= 10 ? 2 : px >= 0.1 ? 4 : px >= 0.001 ? 6 : px >= 1e-5 ? 8 : px >= 1e-7 ? 10 : 12; series.applyOptions({priceFormat:{type:'price',precision:p,minMove:Math.pow(10,-p)}}); }
+  // The status dot (green live, amber busy, red trouble) with a word only when it is not simply live; the details are
+  // its tooltip. While history downloads, a hairline under the top bar fills up.
+  var lastStatus = {};
   function setStatus(m, note){
-    var s = $('status'); s.className = m.sync === 'live' ? 'live' : (m.sync === 'backfilling' || m.sync === 'loading' || m.sync === 'queued') ? 'busy' : '';
-    var txt = note || (m.live_err && (m.sync || '').indexOf('failed') !== 0 ? m.sync + (m.sync === 'live' ? ' (last poll failed: ' : ' (last download attempt failed: ') + m.live_err + ', retrying)' : m.sync);
-    s.querySelector('span').textContent = txt + (m.last ? ' · last candle ' + fmtT(m.last).slice(11) : '') +
-      (m.updated ? ' · checked ' + new Date(m.updated*1000).toISOString().slice(11,19) + 'Z' : '');
-    s.title = s.textContent;
-    var pr = $('prog');
-    if (m.sync === 'backfilling' && m.progress) {
-      pr.className = 'show'; $('progFill').style.width = m.progress.pct + '%'; $('progPct').textContent = m.progress.pct.toFixed(0) + '%';
-      $('progText').textContent = (m.notice || 'downloading minute candles') + ' · at ' + fmtDay(m.progress.at) + ' · the chart grows as they arrive';
-    } else if (m.sync === 'queued' || m.sync === 'loading') {
-      pr.className = 'show'; $('progFill').style.width = '0%'; $('progPct').textContent = ''; $('progText').textContent = m.sync === 'loading' ? (m.venues ? 'merging the exchanges on disk…' : 'loading candles from disk…') : 'waiting for the downloader…';
-    } else pr.className = '';
-    if (m.sync === 'backfilling' && m.venues && m.progress) $('progText').textContent = venueText(m);
+    lastStatus = m;
+    var sync = m.sync || '', s = $('status'), bad = sync === 'error' || sync.indexOf('failed') === 0 || sync === 'server not answering';
+    s.className = sync === 'live' && !m.live_err ? 'live' : bad ? 'bad' : 'busy';
+    var pct = sync === 'backfilling' && m.progress ? Math.floor(m.progress.pct) : null;
+    s.querySelector('span').textContent = sync === 'live' ? (m.live_err ? 'Retrying' : '') : pct !== null ? 'Syncing ' + pct + '%'
+      : sync === 'backfilling' ? 'Syncing' : sync === 'loading' ? 'Loading' : sync === 'queued' ? 'Queued' : sync === 'server not answering' ? 'Offline'
+      : sync.indexOf('restart') === 0 ? 'Restarting' : bad ? 'Error' : sync.charAt(0).toUpperCase() + sync.slice(1);
+    var txt = note || (m.live_err && sync.indexOf('failed') !== 0 ? sync + ' (last ' + (sync === 'live' ? 'poll' : 'download attempt') + ' failed: ' + m.live_err + ', retrying)' : sync);
+    s.title = txt + (m.last ? '\nlast candle ' + fmtT(m.last) : '') + (m.updated ? '\nchecked ' + new Date(m.updated*1000).toISOString().slice(11,19) + 'Z' : '') +
+      (sync === 'backfilling' && m.venues ? '\n\n' + venueText(m) : sync === 'backfilling' && m.notice ? '\n' + m.notice : '');
+    $('prog').className = pct !== null ? 'show' : '';
+    if (pct !== null) $('progFill').style.width = m.progress.pct + '%';
   }
-  function venueText(m){                                          // a combined market: which exchanges are downloading, how many are done
-    var cur = [], done = 0, all = 0;
-    m.venues.forEach(function(v){
-      if (v.status.indexOf('absent') === 0) return;
-      all++;
-      if (v.status === 'done') done++; else if (v.status === 'syncing') cur.push(v.label + (v.pct != null ? ' ' + Math.round(v.pct) + '%' : ''));
-    });
-    return (cur.length ? 'downloading ' + cur.join(', ') : 'catching up') + ' · ' + done + ' of ' + all + ' series done · newest minutes live, the rest merged in every 5 min';
+  function venueText(m){                                          // a combined market: each exchange's download, one per line
+    return m.venues.filter(function(v){ return v.status.indexOf('absent') !== 0; }).map(function(v){
+      return v.label + ': ' + (v.status === 'syncing' && v.pct != null ? Math.round(v.pct) + '%' : v.status);
+    }).join('\n');
   }
   function setTicker(info){
     if (!info) return;
     $('tName').textContent = info.ticker || market;
-    if (info.kind === 'all') {
-      var vs = meta && meta.venues ? meta.venues.filter(function(v){ return v.n > 0; }) : [], ex = {};
-      vs.forEach(function(v){ ex[v.label.split(' ')[0]] = 1; });
-      $('tSub').textContent = 'combined' + (vs.length ? ' · ' + Object.keys(ex).length + ' exchanges, ' + vs.length + ' markets' : '') + (info.name ? ' · ' + info.name : '');
-      $('tSub').title = vs.map(function(v){ return v.label + (v.note ? ' (' + v.note + ')' : ''); }).join(String.fromCharCode(10));
-    } else {
-      $('tSub').textContent = (info.kind === 'perp' ? 'perp' : 'spot') + ' · Bybit only ' + (info.symbol || '') + (info.name ? ' · ' + info.name : '');
-      $('tSub').title = '';
-    }
+    $('tick').title = (info.name ? info.name + ' · ' : '') + 'search a ticker (/)';
     $('star').className = 'tb icon' + (info.watch ? ' on' : ''); $('star').textContent = info.watch ? '★' : '☆';
-    document.title = (info.ticker || market) + ' dollar bars';
+    $('star').title = info.watch ? 'On the watchlist (kept downloaded): click to remove' : 'Add to the watchlist (kept downloaded while the app is open)';
+    document.title = (info.ticker || market) + ' dollar bars';   // the server looks for "dollar bars" in the window title
   }
-  function stats(){
-    var n = bars.length; if (!n) { $('stats').textContent = ''; return; }
-    var hrs = bars.map(function(b){ return (b.e - b.t)/3600; }).sort(function(a,b){ return a-b; });
-    var med = hrs[Math.floor(n/2)], last365 = bars.filter(function(b){ return b.e >= bars[n-1].e - 365*86400; }).length;
-    var months = {}, m0 = fmtDay(bars[0].t).slice(0,7), m1 = fmtDay(bars[n-1].t).slice(0,7);
-    for (var d = new Date(m0 + '-01T00:00:00Z'); d.toISOString().slice(0,7) <= m1; d.setUTCMonth(d.getUTCMonth()+1)) months[d.toISOString().slice(0,7)] = 0;
-    bars.forEach(function(b){ months[fmtDay(b.t).slice(0,7)]++; });
-    var full = Object.keys(months).filter(function(k){ return k !== m0 && k !== m1; });   // drop the two partial months
-    var busy = full.slice().sort(function(a,b){ return months[b]-months[a]; })[0], quiet = full.slice().sort(function(a,b){ return months[a]-months[b]; })[0];
-    var what = mode === 'dollar' ? sizeText() : tf + ' bars';
-    $('stats').innerHTML = '<b>' + n.toLocaleString() + '</b> ' + what + ' since ' + fmtDay(bars[0].t) +
-      (mode === 'dollar' ? ' · median bar <b>' + fmtHrs(med) + '</b> (fastest ' + fmtHrs(hrs[0]) + ', slowest ' + fmtHrs(hrs[n-1]) + ')' : '') +
-      (busy ? ' · busiest month <b>' + busy + '</b> ' + months[busy] + ' bars, quietest <b>' + quiet + '</b> ' + months[quiet] : '') +
-      ' · last 365 days <b>' + last365 + '</b>' + (forming ? ' · forming: ' + (mode === 'dollar' ? fmtD(forming.d) + ' of ' + fmtD(capOf(forming)) + ' (' + Math.round(forming.d/capOf(forming)*100) + '%)' : 'open since ' + fmtT(forming.t)) : '');
+  // The info panel (i): where the data comes from, how much of it there is, and what a bar is.
+  function info(){
+    var mm = (meta && meta.market) || {}, n = bars.length, dl = '', ex = [];
+    var row = function(k, v, title){ dl += '<dt>' + k + '</dt><dd' + (title ? ' title="' + esc(title) + '"' : '') + '>' + v + '</dd>'; };
+    if (mm.kind === 'all') {
+      var vs = meta.venues ? meta.venues.filter(function(v){ return v.n > 0; }) : [], seen = {};
+      vs.forEach(function(v){ var x = v.label.split(' ')[0]; if (!seen[x]) { seen[x] = 1; ex.push(x); } });
+      row('Source', ex.length + ' exchanges, ' + vs.length + ' markets', vs.map(function(v){ return v.label + (v.note ? ' (' + v.note + ')' : ''); }).join('\n') + '\n\n' + (meta.source || ''));
+    } else if (mm.symbol) row('Source', 'Bybit ' + esc(mm.kind) + ' ' + esc(mm.symbol), meta.source || '');
+    if (n) {
+      var secs = bars.map(function(b){ return b.e - b.t; }).sort(function(a, b){ return a - b; });
+      row('Bars', n.toLocaleString());
+      row('Since', fmtDay(bars[0].t));
+      if (mode === 'dollar') row('Typical bar', dur(secs[n >> 1]), 'median; fastest ' + dur(secs[0]) + ', slowest ' + dur(secs[n-1]));
+    }
+    row('Data', esc($('status').querySelector('span').textContent || 'Live') + (lastStatus.last ? ' · ' + fmtT(lastStatus.last).slice(11) : ''), $('status').title);
+    var across = ex.length ? ' across ' + esc(ex.join(', ')) : '';
+    var note = mode !== 'dollar' ? esc(tf) + ' candles from the same minute data' + (ex.length ? ', ' + ex.length + ' exchanges combined' : '') + '.'
+      : (adaptive(size) ? 'About ' + size.slice(2) + ' bars a day: a bar closes once it holds 1/' + size.slice(2) + ' of a typical day\'s turnover' + across + ' (the past 30 days set the size). '
+                        : 'A bar closes once ' + fmtD(size) + ' has traded' + across + '. ') + 'Every bar is drawn the same width, however long it took.';
+    return '<h4>' + esc(mm.ticker || market.split(':')[1] || market) + (mm.name ? '<span>' + esc(mm.name) + '</span>' : '') + '</h4><dl>' + dl + '</dl><p>' + note + '</p>';
   }
   function rows(){ return forming ? bars.concat([forming]) : bars; }   // the bars on the chart, oldest first
   function render(reset){
@@ -263,7 +271,7 @@
     seq++;
     ind.reset(); series.setData(data); ind.render(rows()); fitLimit();
     if (reset) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0, data.length - 260), to:data.length + 4}); scale.applyOptions({autoScale:true}); }
-    stats(); settings.priceLine(); draw.refresh();
+    legend(); settings.priceLine(); draw.refresh();
   }
   function scheduleRetry(){ clearTimeout(retryTimer); retryTimer = setTimeout(function(){ load(true); }, 3000); }
   function load(reset){
@@ -285,20 +293,16 @@
       if (!Object.keys(j.keys).length) {
         $('empty').textContent = meta.sync.indexOf('failed') === 0 ? meta.sync : (meta.notice ? meta.notice + ' · ' : '') + (meta.sync === 'backfilling' ? 'first candles arriving…' : 'waiting for the server to load ' + (meta.market.ticker || mk) + '…') +
           (meta.live_err ? ' — last attempt failed: ' + meta.live_err + ' (retrying)' : '');
-        $('empty').className = 'show'; $('stats').textContent = '';
+        $('empty').className = 'show';
         if (meta.sync.indexOf('failed') !== 0) scheduleRetry();
         return;
       }
       $('empty').className = '';
       if (size === null || (adaptive(size) && (meta.adaptive || []).indexOf(+size.slice(2)) < 0)) size = meta.auto_size;
       else if (!adaptive(size) && meta.sizes.indexOf(size) < 0) size = nearestSize(meta.sizes, size);    // the medians moved since: the closest size left
-      var sel = $('size'); sel.innerHTML = '<optgroup label="fixed size">' + meta.sizes.map(function(s){ return '<option value="' + s + '"' + (s === size ? ' selected' : '') + '>' + fmtD(s) + sizeNote(s) + '</option>'; }).join('') + '</optgroup>' +
-        (meta.adaptive ? '<optgroup label="adaptive: follows trading volume">' + meta.adaptive.map(function(k){ var v = 'a:' + k; return '<option value="' + v + '"' + (v === size ? ' selected' : '') + '>≈' + k + (k === 1 ? ' bar' : ' bars') + ' a day</option>'; }).join('') + '</optgroup>' : '');
-      var tsel = $('tf'); if (!tsel.options.length) tsel.innerHTML = TF.map(function(t){ return '<option value="' + t + '"' + (t === tf ? ' selected' : '') + '>' + t + '</option>'; }).join('');
+      $('bSize').firstChild.textContent = sizeLabel(size);
       var k = j.keys[key()]; if (!k) { scheduleRetry(); return; }
       bars = k.bars; forming = k.forming; lastFullLoad = Date.now(); save();
-      $('foot').textContent = meta.source + ', ' + fmtDay(meta.first) + ' → now. A dollar bar closes with the minute that brings its turnover to the chosen size, so each holds the size plus that minute\'s overflow. ' +
-        'The x-axis is bar order, not the clock: every bar is the same width however long it took. Bar times are open times. Drawings are kept per market and placed by time, so they show on every bar size.';
       render(reset);
     }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; if (mk !== market || moved) load(true); });   // the user moved on meanwhile: load what they want now
   }
@@ -324,7 +328,7 @@
       forming = k.forming;
       if (forming) { byTime[forming.t] = forming; put(forming); }
       if (bars.length + (forming ? 1 : 0) !== before || (forming && forming.t) !== formingT) { seq++; draw.refresh(); }
-      fitLimit(); stats(); settings.priceLine();
+      fitLimit(); legend(); settings.priceLine();
     }).catch(function(){ if (!restarting) setStatus({sync:'server not answering'}); });
   }
 
@@ -341,18 +345,15 @@
       var groups = [], byT = {};
       lastRows.forEach(function(r){ if (!byT[r.ticker]) { byT[r.ticker] = {ticker:r.ticker, name:r.name, stock:r.stock, rows:[]}; groups.push(byT[r.ticker]); } byT[r.ticker].rows.push(r); });
       var html = groups.slice(0, 40).map(function(g){
-        var known = g.rows.filter(function(r){ return r.first; }), best = null;
-        if (known.length) best = known.reduce(function(a, b){ return (b.first < a.first || (b.first === a.first && b.kind === 'perp' && a.kind !== 'perp')) ? b : a; });
         var all = 'all:' + g.ticker;
-        return '<div class="grp"><div class="gh"><b>' + esc(g.ticker) + '</b><span>' + esc(g.name || '') + (g.stock ? ' · tokenized stock / stock perp' : '') + '</span>' +
-          (known.length ? '<em>Bybit since ' + fmtMon(best.first) + '</em>' : '') + '</div><div class="gm">' +
-          '<button data-key="' + esc(all) + '" class="' + (all === market ? 'cur' : 'best') + '">combined <span class="tag">every exchange that lists it · dollars summed · the first open downloads them</span></button>' +
+        return '<div class="grp"><div class="gh"><b>' + esc(g.ticker) + '</b><span>' + esc(g.name || '') + (g.stock ? ' · stock' : '') + '</span></div><div class="gm">' +
+          '<button data-key="' + esc(all) + '" class="' + (all === market ? 'cur' : 'best') + '" title="Every exchange that lists it, dollars summed (the first open downloads them)">All exchanges</button>' +
           g.rows.map(function(r){
-            return '<button data-key="' + esc(r.key) + '" class="' + (r.key === market ? 'cur' : '') + '">Bybit only: ' + r.kind + ' ' + esc(r.symbol) +
-              ' <span class="tag">' + (r.first ? 'since ' + fmtMon(r.first) : r.first === 0 ? 'no candles' : 'depth ?') + (r.have ? ' · on disk' : '') + (r.status === 'backfilling' ? ' · downloading' : '') + '</span></button>';
+            var tag = (r.first ? fmtMon(r.first) : r.first === 0 ? 'no candles' : '') + (r.status === 'backfilling' ? ' · downloading' : '');
+            return '<button data-key="' + esc(r.key) + '" class="' + (r.key === market ? 'cur' : '') + '" title="Bybit only' + (r.first ? ', since ' + fmtMon(r.first) : '') + (r.have ? ', on disk' : '') + '">Bybit ' + r.kind + ' ' + esc(r.symbol) +
+              (tag ? ' <span class="tag">' + tag + '</span>' : '') + '</button>';
           }).join('') + '</div></div>';
       }).join('');
-      if (!v && j.pending) html += '<div class="hint">' + j.pending + ' markets still to be depth-checked in the background</div>';
       $('res').innerHTML = html;
       Array.prototype.forEach.call($('res').querySelectorAll('button[data-key]'), function(b){ b.onclick = function(){ go(this.getAttribute('data-key')); }; });
     }).catch(function(){ $('res').innerHTML = '<div class="hint">server not answering</div>'; });
@@ -362,8 +363,8 @@
     if (k === market) return;
     market = k; size = sizes[market] || null; bars = []; forming = null; meta = null; seq++;
     history.replaceState(null, '', '#' + market);
-    ind.clear(); series.setData([]); $('stats').textContent = ''; $('lgBar').textContent = 'hover a bar';
-    $('tName').textContent = k.split(':')[1]; $('tSub').textContent = 'loading…';
+    hoverT = null; ind.clear(); series.setData([]); $('lgBar').innerHTML = '';
+    $('tName').textContent = k.split(':')[1] || k;
     draw.setMarket(market);
     save(); load(true);
   }
@@ -373,10 +374,9 @@
     if (restarting) return;
     if (!m || !m.update) { if (update) { update = null; $('banner').className = ''; draw.refresh(); } return; }
     update = m.update;
-    $('bannerText').textContent = update.stale ? 'This window shows an older version of the chart: reload to update (instant)'
-      : update.kind === 'reload'
-      ? 'Update available: ' + update.files.join(', ') + ' changed (page reload, instant)'
-      : 'Update available: ' + update.files.join(', ') + ' changed (server restart, about 10 s)';
+    $('bannerText').textContent = 'Update available';
+    $('banner').title = update.stale ? 'This window shows an older version of the chart: a reload brings the new one (instant)'
+      : update.files.join(', ') + ' changed: ' + (update.kind === 'reload' ? 'a page reload (instant)' : 'a server restart (about 10 s)');
     if ($('banner').className !== 'show') { $('banner').className = 'show'; draw.refresh(); }   // the drawing toolbar moves out of its way
   }
   function runUpdate(){
@@ -388,7 +388,7 @@
   }
   function restartNow(){
     if (update.kind === 'reload') { location.reload(); return; }
-    restarting = true; $('bannerText').textContent = 'Restarting the server…'; $('bannerBtn').style.display = 'none'; setStatus({sync:'restarting…'});
+    restarting = true; $('bannerText').textContent = 'Restarting…'; $('bannerBtn').style.display = 'none'; setStatus({sync:'restarting…'});
     var oldPid = null, gone = false, t0 = Date.now(), iv = null;
     var say = function(text){ $('bannerText').textContent = text; };
     fetch('/restart').then(function(r){ return r.json(); }).then(function(j){
@@ -400,17 +400,32 @@
       var waited = Date.now() - t0;
       fetch('/ping', {cache:'no-store'}).then(function(r){ return r.json(); }).then(function(j){
         if (j.ok && (oldPid !== null ? j.pid !== oldPid : gone)) { clearInterval(iv); location.reload(); }   // a new copy answers: reload onto it
-        else if (waited > 90000) say('The server did not come back. Close this window and open the app again.');
+        else if (waited > 90000) say('The server did not come back: close this window and open the app again.');
       }).catch(function(){                                                                               // still nobody: say so (and keep asking)
-        if (gone && waited > 4000) say('The chart server is not running: it stops by itself when this window has been hidden for a while. Close this window and open the app again (it starts on the new version).');
-        else if (waited > 90000) say('The server did not come back. Close this window and open the app again.');
+        if (gone && waited > 4000) say('The chart server is not running: close this window and open the app again.');
+        else if (waited > 90000) say('The server did not come back: close this window and open the app again.');
       });
     }, 1000);
   }
 
+  // Bar size: the fixed sizes (those that are the median hour, day, week… say so), then the adaptive ones
+  function sizeMenu(anchor){
+    if (!meta || !meta.sizes) return;
+    var pick = function(s){ return function(){ size = s; $('bSize').firstChild.textContent = sizeLabel(s); save(); load(true); }; };
+    var items = [{head: 'Bar size'}].concat(meta.sizes.map(function(s){
+      var n = sizeNote(s);
+      return {html: '<span class="ck">✓</span>' + fmtD(s) + (n ? '<span class="tag">' + n + '</span>' : ''), on: s === size, onClick: pick(s)};
+    }));
+    if (meta.adaptive && meta.adaptive.length) items = items.concat([{head: 'Adaptive: follows volume'}], meta.adaptive.map(function(k){
+      var v = 'a:' + k;
+      return {html: '<span class="ck">✓</span>' + sizeLabel(v), on: v === size, onClick: pick(v)};
+    }));
+    UI.menu(anchor, items);
+  }
+
   function switchTo(m){
     mode = m; $('bDollar').className = m === 'dollar' ? 'on' : ''; $('bTime').className = m === 'time' ? 'on' : '';
-    $('lSize').style.display = m === 'dollar' ? '' : 'none'; $('lTf').style.display = m === 'time' ? '' : 'none';
+    $('bSize').style.display = m === 'dollar' ? '' : 'none'; $('bTf').style.display = m === 'time' ? '' : 'none';
     save(); load(true);
   }
 
@@ -444,11 +459,17 @@
     $('bannerBtn').onclick = runUpdate;
     $('bDollar').onclick = function(){ switchTo('dollar'); };
     $('bTime').onclick = function(){ switchTo('time'); };
-    $('size').onchange = function(){ size = this.value.indexOf('a:') === 0 ? this.value : +this.value; this.blur(); save(); load(true); };   // blur: the keys go back to the chart
-    $('tf').onchange = function(){ tf = this.value; this.blur(); save(); load(true); };
-    if (mode === 'time') { $('bDollar').className = ''; $('bTime').className = 'on'; $('lSize').style.display = 'none'; $('lTf').style.display = ''; }
+    $('bSize').onclick = function(){ sizeMenu(this); };
+    $('bTf').onclick = function(){
+      UI.menu(this, [{head: 'Timeframe'}].concat(TF.map(function(t){
+        return {html: '<span class="ck">✓</span>' + t, on: t === tf, onClick: function(){ tf = t; $('bTf').firstChild.textContent = t; save(); load(true); }};
+      })));
+    };
+    $('bTf').firstChild.textContent = tf;
+    if (mode === 'time') { $('bDollar').className = ''; $('bTime').className = 'on'; $('bSize').style.display = 'none'; $('bTf').style.display = ''; }
     $('bSettings').onclick = function(){ settings.open(); };
     $('bInd').onclick = function(){ ind.menu(this); };
+    $('bInfo').onclick = function(){ UI.popover(this, info()); };
   }
 
   // what settings.js, draw.js and indicators.js see of the page
