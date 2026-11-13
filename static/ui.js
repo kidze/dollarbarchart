@@ -114,17 +114,33 @@
     popup = {el: box, anchor: anchor, close: function(){ box.remove(); if (opts.onClose) opts.onClose(); }};
   }
 
-  /* A drop-down list under `anchor`. items: [{html, on, onClick}] */
+  /* A drop-down list under `anchor`. items: [{html, on, onClick}], or {head: 'text'} for a section heading */
   function menu(anchor, items){
+    var again = popup && popup.anchor === anchor && popup.el.classList.contains('menu');   // its button again: just close it
     closePopup();
+    if (again) return;
     var box = el('div', 'menu');
     items.forEach(function(it){
+      if (it.head) { box.appendChild(el('div', 'mh', esc(it.head))); return; }
       var b = el('button', it.on ? 'on' : '', it.html);
       b.onclick = function(){ closePopup(); it.onClick(); };
       box.appendChild(b);
     });
     document.body.appendChild(box);
     place(box, anchor);
+    popup = {el: box, anchor: anchor, close: function(){ box.remove(); }};
+  }
+
+  /* A panel of text under `anchor` (right-aligned to it), closed like a menu; a second click on the anchor closes it. */
+  function popover(anchor, html){
+    var again = popup && popup.anchor === anchor && popup.el.classList.contains('pop');
+    closePopup();
+    if (again) return;
+    var box = el('div', 'pop', html);
+    document.body.appendChild(box);
+    var r = anchor.getBoundingClientRect();
+    box.style.left = Math.max(8, Math.min(r.right - box.offsetWidth, innerWidth - box.offsetWidth - 8)) + 'px';
+    box.style.top = (r.bottom + 6) + 'px';
     popup = {el: box, anchor: anchor, close: function(){ box.remove(); }};
   }
 
@@ -188,7 +204,7 @@
   }
 
   window.UI = {$: $, esc: esc, el: el, parse: parse, rgba: rgba, hex: hex, withAlpha: withAlpha, norm: norm,
-               PALETTE: PALETTE, pickColor: pickColor, menu: menu, dialog: dialog, swatch: swatch, closePopup: closePopup,
+               PALETTE: PALETTE, pickColor: pickColor, menu: menu, popover: popover, dialog: dialog, swatch: swatch, closePopup: closePopup,
                // true while a picker, menu or dialog has the keyboard: the chart's shortcuts stand down
                busy: function(e){ return !!popup || !!document.querySelector('.modal') || (e && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)); }};
 })();

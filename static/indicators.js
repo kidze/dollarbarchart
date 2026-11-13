@@ -9,8 +9,9 @@
    It depends on the date alone, so it is the same curve on dollar bars and on time bars. Every bar gets the value at the
    moment it closed (the forming bar: its newest minute), so a bar's close and the line under it are from the same moment.
 
-   With it come its multiples at the low and the top of every past cycle (LEVELS): thinner lines that run parallel to it
-   on a log scale, each named on the price axis where it leaves the chart. The legend says between which two the price is.
+   With it come its multiples at the low and the top of every past cycle (LEVELS): faint lines that run parallel to it on
+   a log scale, lows solid and tops dashed. They are not named on the chart (that made the price axis a wall of words);
+   the menu item's tooltip says what they are.
 
    It shows on Bitcoin charts only; on any other chart the switch is remembered and nothing is drawn.
    Exposes window.DBCIndicators(app). */
@@ -20,7 +21,7 @@
   // Gold: apart from the candles' green and red and the drawings' blue, also for color-blind eyes, and light enough
   // that the chart writes its price-axis label in black on it.
   var COLOR = '#E6A820';
-  var THIN = 'rgba(230,168,32,0.8)', CHIP = '#33290d', INK = '#F5C65A';   // the multiples: thinner lines, quieter axis labels
+  var THIN = 'rgba(230,168,32,0.42)';                            // the multiples: thin and faint, the line itself stays the thing to read
   var NAME = 'Power law 2013';
   // How far from the line the price got at each cycle's low and top: the daily close as a multiple of the line on the day
   // that multiple was the lowest (highest) of the cycle. Coin Metrics daily closes, worked out on 2026-11-12; the month is
@@ -37,7 +38,6 @@
     {k: 15.66, name: 'Nov 2013 top', tag: '2013 top', top: true}
   ];
   var LOWS = LEVELS.filter(function(b){ return !b.top; });
-  var LADDER = LEVELS.concat([{k: 1, name: 'the line'}]).sort(function(a, b){ return a.k - b.k; });
   var $ = UI.$;
 
   function powerLaw(t){ var d = (t - GENESIS) / 86400; return d > 0 ? A * Math.pow(d, N) : null; }
@@ -46,7 +46,6 @@
   function isBitcoin(key, info){
     return /^[a-z]+:BTC(USDT|USDC|USD|PERP)?$/.test(key) || !!(info && info.key === key && info.ticker === 'BTC');
   }
-  function times(k){ return (k >= 10 ? k.toFixed(1) : k.toFixed(2)) + '×'; }
 
   window.DBCIndicators = function(app){
     var LC = window.LightweightCharts;
@@ -57,13 +56,13 @@
     function drop(){
       if (line) {
         app.chart.removeSeries(line); line = null;
-        app.chart.applyOptions({});                              // a fresh layout: the price axis, widened for the level names, goes back to its width at once
+        app.chart.applyOptions({});                              // a fresh layout: the price axis drops the line's label at once
       }
       vals = []; lastT = 0;
     }
 
     // ------------------------------------------------------------ the multiples: drawn by a primitive on the line's series
-    // Where each multiple leaves the chart on the right: its value and height at the last bar in view (what its axis label shows).
+    // Where each multiple leaves the chart on the right: its value and height at the last bar in view.
     function ends(){
       var n = vals.length, r = line && n ? app.chart.timeScale().getVisibleLogicalRange() : null;
       var i = r ? Math.min(n - 1, Math.floor(r.to)) : -1;
@@ -103,22 +102,11 @@
         ctx.setLineDash([]);
       });
     }
-    var now = [], renderer = {draw: paint};
+    var renderer = {draw: paint};
     var paneViews = [{zOrder: function(){ return 'normal'; }, renderer: function(){ return renderer; }}];
-    var axisViews = LEVELS.map(function(b, i){                    // the chart keeps views by identity: always this same array
-      return {
-        coordinate: function(){ return now[i] && now[i].y !== null ? now[i].y : -100; },
-        text: function(){ return now[i] ? app.fmtP(now[i].v) + '  ' + b.tag : ''; },
-        textColor: function(){ return INK; },
-        backColor: function(){ return CHIP; },
-        visible: function(){ return !!(now[i] && now[i].seen); },  // off screen: hide it (the chart would pin it to the axis edge)
-        tickVisible: function(){ return true; }
-      };
-    });
     var primitive = {
       updateAllViews: function(){},
       paneViews: function(){ return paneViews; },
-      priceAxisViews: function(){ now = ends(); return axisViews; },
       // Auto scale makes room for the lows where they leave the chart on the right, next to the line itself (in a bear
       // market they sit just under the price). Not for all of their length: further left they are lower and would only
       // add empty space. The tops do not count at all: up to 16 times higher, they would squeeze the candles flat.
@@ -128,19 +116,11 @@
       }
     };
 
-    // ------------------------------------------------------------ legend: two more lines under the bar's own
-    // The line's value at the bar the legend is about (before any hover: the newest bar), the close as a multiple of it,
-    // and the two levels that multiple sits between.
-    function between(q, v){
-      var lo = null, hi = null;
-      LADDER.forEach(function(b){ if (b.k <= q) lo = b; else if (!hi) hi = b; });
-      function say(b){ return b.k === 1 ? 'the line' : '<b>' + times(b.k) + '</b> ' + b.name + ' (' + app.fmtP(v * b.k) + ')'; }
-      return lo && hi ? 'between ' + say(lo) + ' and ' + say(hi) : lo ? 'above ' + say(lo) : 'below ' + say(hi);
-    }
+    // ------------------------------------------------------------ legend: one line under the bar's own
+    // The line's value at the bar the legend is about (before any hover: the newest bar).
     function legend(){
       var r = hovered || app.lastBar(), v = line && r ? powerLaw(r.e || r.t) : null;
-      var html = !v ? '' : '<i style="background:' + COLOR + '"></i>' + NAME + ' <b>' + app.fmtP(v) + '</b> · ' +
-        (hovered ? 'close' : 'price') + ' is <b>' + (r.c / v).toFixed(2) + '×</b> the line<div class="sub">' + between(r.c / v, v) + '</div>';
+      var html = !v ? '' : '<i style="background:' + COLOR + '"></i>' + NAME + ' <b style="color:' + COLOR + '">' + app.fmtP(v) + '</b>';
       if (html !== shown) $('lgInd').innerHTML = shown = html;       // called on every mouse move: write only a change
     }
 
@@ -170,7 +150,7 @@
       if (!hovered) legend();
     }
     function clear(){ hovered = null; drop(); legend(); }           // another market is loading
-    function hover(r){ hovered = r; legend(); }
+    function hover(r){ hovered = r || null; legend(); }             // null: the mouse left the bars, back to the newest
 
     function button(){ $('bInd').className = 'tb' + (on ? ' on' : ''); }
     function toggle(){
@@ -178,10 +158,10 @@
       button(); reset(); render(app.rows());
     }
     function menu(anchor){
-      UI.menu(anchor, [{on: on, onClick: toggle,
-        html: '<span class="ck">✓</span><span title="price = 4.41877e-17 × (days since 2009-01-03) ^ 5.59807, as posted in February 2013, ' +
-              'and its multiples at the low and the top of every cycle since">Bitcoin power law, 2013 formula, with past cycle lows and tops</span>' +
-              (applies() ? '' : '<span class="tag">Bitcoin charts only</span>')}]);
+      UI.menu(anchor, [{head: 'Indicators'}, {on: on, onClick: toggle,
+        html: '<span class="ck">✓</span><span title="price = 4.41877e-17 × (days since 2009-01-03) ^ 5.59807, as posted in February 2013. ' +
+              'The faint lines are its multiples at past cycle lows (solid: 2015, 2019, 2020, 2022, 2026) and tops (dashed: 2013, 2017, 2021, 2024).">' + NAME + '</span>' +
+              (applies() ? '' : '<span class="tag">Bitcoin only</span>')}]);
     }
     button();
 
