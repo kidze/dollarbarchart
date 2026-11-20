@@ -31,6 +31,7 @@ reloads by itself.
   /ping, /restart
 """
 import http.server
+import itertools
 import json
 import os
 import re
@@ -74,6 +75,8 @@ STALE_PRICE_S = 3600                                             # the price che
 REPLAN_S = 3600                                                  # an exchange's missing market list is asked for again after this
 RESYNC_S = 900                                                   # a combined market with a failed exchange tries it (only it) again after this
 CACHE_REFRESH_DAYS = 7                                           # the merge cache is rewritten once the days merged on top of it reach this
+LOAD_THREADS = 4                                                 # a combined market's series files are read this many at a time
+START_GRACE_S = 15                                               # background downloads wait this long after start-up for the page to ask for its market
 POOL = ThreadPoolExecutor(12, thread_name_prefix="live")         # the combined markets' live polls, all exchanges at once
 STATIC = HERE / "static"
 PAGE_TYPES = {".js": "application/javascript", ".css": "text/css"}
@@ -84,6 +87,8 @@ STATE = {"markets": {}, "stop": False, "restarting": False, "last_req": time.tim
          "index_stale": False, "index_fetched": 0.0, "index_retry_at": 0.0, "scan_failed": set(), "bg_retry_at": 0.0,
          "watchlist": [], "watch_done": set()}
 LOCK = threading.RLock()
+GEN = itertools.count(int(time.time() * 1000))                   # every build of a market's bar sets takes the next number (Market.gen):
+                                                                 # never one an earlier run of the server handed out
 WORKER_DONE = threading.Event()
 SRV = None
 
@@ -95,6 +100,8 @@ class Market:
         self.sets = None
         self.meta = {}
         self.built_n = 0                                         # candles the bar sets were last built from
+        self.gen = 0                                             # which build the bar sets are (GEN): a page holding bars of another
+                                                                 # build takes the whole set again, a later build may have cut them elsewhere
         self.sync = "queued"                                     # queued | loading | backfilling | live | failed: ...
         self.progress = None                                     # {"pct", "at"} while backfilling
         self.first_ms = None
@@ -331,7 +338,7 @@ def market_info(key: str) -> dict:
 
 
 def meta_of(m: Market) -> dict:
-    out = dict(m.meta, sync=m.sync, progress=m.progress, updated=m.updated, live_err=m.live_err[:120], notice=m.notice,
+    out = dict(m.meta, gen=m.gen, sync=m.sync, progress=m.progress, updated=m.updated, live_err=m.live_err[:120], notice=m.notice,
                build=build_tag(STATE["build"]), update=STATE["update"], market=market_info(m.key),
                index_status=STATE["index_status"], source=source_text(m))
     if m.combined:
@@ -468,6 +475,9 @@ def next_job(current=None):
             return None
         if STATE["index_stale"] and now >= STATE["index_retry_at"]:
             return ("index", None)
+        if not STATE["markets"] and now - STATE["started"] < START_GRACE_S:
+            return None                                          # just started: the page's market goes first (a watchlist download
+                                                                 # begun a second before it asks holds the worker for seconds)
         if STATE["index"] and scan_pending():
             return ("scan", None)
         if STATE["index"]:
@@ -499,7 +509,7 @@ def sync_market(m: Market, job) -> None:
             m.cd = cd
             if cd.n:
                 m.sets, m.meta = B.build_all(cd)
-                m.built_n = cd.n
+                m.built_n, m.gen = cd.n, next(GEN)
                 m.updated = time.time()
     cd = m.cd
     if cd.n:
@@ -523,14 +533,14 @@ def sync_market(m: Market, job) -> None:
             moved = auto >= 2 * cur or auto <= cur / 2
             if (moved and cd.n - m.built_n >= 1440) or (force and cd.n - m.built_n >= 60):
                 m.sets, m.meta = B.build_all(cd)
-                m.built_n = cd.n
+                m.built_n, m.gen = cd.n, next(GEN)
 
     def on_rows(rows):
         with LOCK:
             cd.upsert(rows)
             if m.sets is None:
                 m.sets, m.meta = B.build_all(cd)
-                m.built_n = cd.n
+                m.built_n, m.gen = cd.n, next(GEN)
             else:
                 B.update_all(m.sets, cd)
                 m.meta["last"] = int(cd.ts[cd.n - 1] // 1000)
@@ -563,11 +573,12 @@ def sync_market(m: Market, job) -> None:
 
 # ---------------------------------------------------------------- combined markets: all:<TICKER>
 
-def plan_all(ticker: str) -> tuple:
+def plan_all(ticker: str, lists_max_age_s: float = V.REFRESH_S) -> tuple:
     """The series a combined market is made of: one spot and one perp per exchange. On Bybit, the deepest
     market of each kind whose display ticker is exactly this one (USDT first; 1000x contracts are left out
     because their prices are not the coin's). Each entry tracks its own download: status queued | syncing |
-    done | paused | absent: why | failed: why. Returns (series, exchanges whose market list is missing)."""
+    done | paused | absent: why | failed: why. Returns (series, exchanges whose market list is missing).
+    lists_max_age_s = infinity: the exchanges' market lists as they are on disk, however old (no request)."""
     series = []
     exact = [r for r in MK.candidates(STATE["index"] or [], ticker) if r["ticker"] == ticker and r.get("first") != 0]
     for kind in ("perp", "spot"):
@@ -576,7 +587,7 @@ def plan_all(ticker: str) -> tuple:
             r = min(rows, key=lambda r: (r.get("first") or float("inf"), r["quote"] != "USDT"))
             series.append({"venue": "bybit", "symbol": r["key"], "kind": kind, "list_ms": 0})
     try:
-        inst = V.load_instruments()
+        inst = V.load_instruments(lists_max_age_s)
     except Exception as e:
         log(f"{ticker}: exchange instrument lists failed: {type(e).__name__}: {e}")
         inst = {}
@@ -630,11 +641,19 @@ def merged_frame(m: Market) -> pd.DataFrame:
     _, ticker = parse_key(m.key)
     order = {v: i for i, v in enumerate(V.PRIORITY)}
     parts = sorted([s for s in m.venues if not s["status"].startswith("absent")], key=lambda s: (s["kind"] != "perp", order.get(s["venue"], 9)))
-    loaded = []
-    for s in parts:
+
+    def read(s):
         try:
-            f = V.load(s["venue"], s["symbol"])
+            return V.load(s["venue"], s["symbol"])
         except X.Damaged as e:
+            return e
+
+    with ThreadPoolExecutor(LOAD_THREADS, thread_name_prefix="load") as ex:   # (reading and decoding wait on the disk and on C code:
+        files = list(ex.map(read, parts))                        # side by side they take a third of the time)
+    loaded = []
+    for s, f in zip(parts, files):
+        if isinstance(f, X.Damaged):
+            e = f
             log(f"{m.key}: {s['label']} unreadable ({e}), downloading it again")
             if s["venue"] == "bybit":
                 X.set_aside(s["symbol"])
@@ -649,9 +668,10 @@ def merged_frame(m: Market) -> pd.DataFrame:
     ref = ref if ref is not None else (max((f for _, f in loaded), key=len) if loaded else None)
     ref_kept = C.trust(ref, None, jumps=False) if ref is not None else None
     ref_daily = C.daily_close(ref_kept) if ref_kept is not None else None
+    with ThreadPoolExecutor(LOAD_THREADS, thread_name_prefix="trust") as ex:
+        kepts = list(ex.map(lambda sf: ref_kept if sf[1] is ref else C.trust(sf[1], ref_daily), loaded))
     frames, labels = [], []
-    for s, f in loaded:
-        kept = ref_kept if f is ref else C.trust(f, ref_daily)
+    for (s, f), kept in zip(loaded, kepts):
         if len(kept) == len(f):
             s["note"] = ""
         elif not len(kept):
@@ -714,11 +734,31 @@ def rebuild_all(m: Market) -> None:
     cd = B.Candles(frame)
     sets, meta = (B.build_all(cd) if cd.n else (None, {}))
     with LOCK:
-        m.cd, m.sets, m.meta, m.built_n = cd, sets, meta, cd.n
+        m.cd, m.sets, m.meta, m.built_n, m.gen = cd, sets, meta, cd.n, next(GEN)
         m.first_ms = int(cd.ts[0]) if cd.n else None
         m.built_at = m.updated = time.time()
         m.built_done = sum(1 for s in m.venues or [] if s["status"] == "done")
     log(f"{m.key}: merged {cd.n:,} minutes from {sum(1 for s in m.venues if s.get('n'))} series in {time.time() - t0:.1f}s")
+
+
+def show_disk(m: Market, ticker: str) -> None:
+    """A market that was merged before shows from its files before any exchange is asked anything (a market list
+    to refresh, a price to check: seconds on a good day, a timeout each without a network). Its series are the
+    ones of that merge, found in the market lists as they are on disk; sync_all() then plans again with fresh
+    lists, and checks these series' prices like any newly planned one."""
+    try:
+        cj = cache_paths(ticker)[1]
+        made_of = json.loads(cj.read_text(encoding="utf-8"))["parts"] if cj.exists() else {}
+        series = [s for s in plan_all(ticker, float("inf"))[0] if s["label"] in made_of] if made_of else []
+    except Exception as e:
+        log(f"{m.key}: not shown from disk first: {type(e).__name__}: {e}")
+        return
+    if not series:
+        return
+    for s in series:
+        s["unchecked"] = True
+    m.venues, m.replan, m.sync = series, True, "loading"
+    rebuild_all(m)
 
 
 def sync_part(m: Market, s: dict, stop) -> None:
@@ -787,6 +827,8 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
         if STATE["index"] is None:                               # Bybit's list is not in yet (first launch, slow network): plan later
             m.retry_at = time.time() + 5
             return
+        if build and m.venues is None and m.cd is None:
+            show_disk(m, ticker)
         planned, missing = plan_all(ticker)
         have = {(s["venue"], s["kind"]) for s in m.venues or []}
         fresh = [s for s in planned if (s["venue"], s["kind"]) not in have]   # one spot + one perp per exchange, first pick kept
@@ -803,6 +845,7 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
         m.replan = bool(missing)
         if missing:
             log(f"{m.key}: market lists missing for {', '.join(missing)}: planned again later")
+        fresh = [s for s in m.venues if s.pop("unchecked", False)] + fresh   # (the ones show_disk() planned come first)
         if fresh:
             price_check(m, fresh)
             log(f"{m.key}: {len(fresh)} series: " + ", ".join(s["label"] + (" (left out)" if s["status"].startswith("absent") else "") for s in fresh))
@@ -862,6 +905,8 @@ def sync_all(m: Market, job, build: bool = True, only_failed: bool = False) -> N
     failed = [s for s in m.venues if s["status"].startswith("failed")]
     recovered = only_failed and any(s["status"] == "done" for g in groups.values() for s in g)
     if build and not stop() and (recovered or not only_failed):
+        if m.progress:                                           # every download is in: what is left is the merge, and the page says so
+            m.progress = dict(m.progress, merging=True)
         rebuild_all(m)
     for s in m.venues:
         s.pop("grew", None)
@@ -1365,6 +1410,7 @@ def main() -> None:
     STATE["build"] = build_id()
     migrate()
     STATE["watchlist"] = MK.load_watchlist()
+    STATE["started"] = time.time()                               # (the port may have been waited for)
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=live_loop, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()

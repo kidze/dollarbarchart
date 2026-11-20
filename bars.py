@@ -81,30 +81,104 @@ def _px(x) -> float:
     return float(f"{float(x):.6g}")
 
 
-def dollar_bars(cd: Candles, size: float, start: int = 0):
+_P10 = np.array([float(f"1e{i}") for i in range(23)])           # 10^0 .. 10^22: each one exact as a float
+
+
+def px_all(x) -> list:
+    """_px() of every value at once, the same floats. A value times a power of ten is rounded to a whole number
+    and divided back (both steps exact: the power is, and so is the whole number); the few values within a
+    millionth of a half there, where the product's own rounding could tip the result, take _px itself."""
+    x = np.asarray(x, float)
+    a = np.abs(x)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        k = 5 - np.floor(np.log10(a))                            # decimals kept (negative: a price of millions)
+        fast = np.isfinite(k) & (np.abs(k) <= 22)
+        ki = np.where(fast, k, 0).astype(np.int64)
+        p = _P10[np.abs(ki)]
+        m = np.where(ki >= 0, a * p, a / p)
+        fast &= np.abs(m - np.floor(m) - 0.5) > 1e-6
+        out = np.where(fast, np.copysign(np.where(ki >= 0, np.rint(m) / p, np.rint(m) * p), x), x).tolist()
+    for i in np.flatnonzero(~fast).tolist():
+        out[i] = _px(out[i])
+    return out
+
+
+def bars_of(cd: Candles, s: np.ndarray, e: np.ndarray, z=None) -> list:
+    """cd.bar(s[k], e[k]) for every k at once: bars that follow each other without a gap (each starts on the
+    candle after the one before ended). z = one size per bar, carried as "z" (adaptive bars)."""
+    if not len(s):
+        return []
+    a, b, at = int(s[0]), int(e[-1]) + 1, s - s[0]
+    cols = [(cd.ts[s] // 1000).tolist(), ((cd.ts[e] + MINUTE) // 1000).tolist(), px_all(cd.o[s]),
+            px_all(np.maximum.reduceat(cd.h[a:b], at)), px_all(np.minimum.reduceat(cd.l[a:b], at)), px_all(cd.c[e]),
+            np.rint(np.add.reduceat(cd.d[a:b], at)).astype(np.int64).tolist(), (e - s + 1).tolist()]
+    if z is None:
+        return [{"t": t, "e": u, "o": o, "h": h, "l": lo, "c": c, "d": d, "n": n} for t, u, o, h, lo, c, d, n in zip(*cols)]
+    return [{"t": t, "e": u, "o": o, "h": h, "l": lo, "c": c, "d": d, "n": n, "z": w}
+            for t, u, o, h, lo, c, d, n, w in zip(*cols, z)]
+
+
+def _cut(cum: np.ndarray, size_at, never_falls: bool) -> list:
+    """Where each bar ends: the first candle at which the dollars since the bar opened reach size_at(the bar's
+    first candle). cum = the candles' running dollars. A bar ends near where it starts, so each search looks at
+    a short stretch first and widens it (the same answer as searching everything while cum never falls, far
+    quicker on years of minutes)."""
+    m, ends, i, w = len(cum), [], 0, 64
+    find = cum.searchsorted
+    while i < m:
+        target = (cum[i - 1] if i else 0.0) + size_at(i)
+        if never_falls:
+            hi = min(m, i + w)
+            j = i + int(cum[i:hi].searchsorted(target, side="left"))
+            while j == hi and hi < m:
+                w *= 8
+                hi = min(m, i + w)
+                j = i + int(cum[i:hi].searchsorted(target, side="left"))
+            w = max(64, 2 * (j - i + 1))
+        else:
+            j = int(find(target, side="left"))
+        if j >= m:
+            break
+        ends.append(j)
+        i = j + 1
+    return ends
+
+
+def _dollars(cd: Candles, start: int, cum=None) -> tuple:
+    """(running dollars of candles start.., whether they never fall): cum = a build's shared running dollars from candle 0."""
+    d = cd.d[start:cd.n]
+    if cum is None or start:
+        cum = np.cumsum(d)
+    return cum, not bool((d < 0).any())
+
+
+def dollar_bars(cd: Candles, size: float, start: int = 0, cum=None):
     """Completed bars from candle `start` on, the forming bar, and the index where the forming bar starts."""
     n = cd.n
     if start >= n:
         return [], None, start
-    cum = np.cumsum(cd.d[start:n])
-    out, i = [], 0
-    while True:
-        base = cum[i - 1] if i > 0 else 0.0
-        j = int(np.searchsorted(cum, base + size, side="left"))   # first candle at which the bar's dollars reach size
-        if j >= len(cum):
-            break
-        out.append(cd.bar(start + i, start + j))
-        i = j + 1
-    forming = cd.bar(start + i, n - 1) if i < len(cum) else None
-    return out, forming, start + i
+    cum, never_falls = _dollars(cd, start, cum)
+    ends = np.asarray(_cut(cum, lambda i: size, never_falls), np.int64) + start
+    starts = np.concatenate(([start], ends[:-1] + 1)) if len(ends) else ends
+    i = int(ends[-1]) + 1 if len(ends) else start
+    forming = cd.bar(i, n - 1) if i < n else None
+    return bars_of(cd, starts, ends), forming, i
 
 
-def day_sizes(cd: Candles, per_day: float, d_from: int, d_to: int) -> dict:
+def day_sizes(cd: Candles, per_day: float, d_from: int, d_to: int, medians: dict = None) -> dict:
     """{epoch day: adaptive bar size} for days d_from..d_to: the median turnover of the ADAPT_DAYS most recent
     days before each that had trades (at most ADAPT_LOOKBACK days back), over per_day. A day without candles is
     a hole in the data or a halted market, not a $0 day: counted as $0, a month-long hole (Bitfinex has no BTC
     minutes for December 2014) collapsed the size to $1 and made every minute after it a bar. A day with no
-    such day behind it uses its own total. Never below $1."""
+    such day behind it uses its own total. Never below $1. medians = day_medians() of those days, when the
+    caller has them (a build cuts three adaptive sets from the same medians)."""
+    if medians is None:
+        medians = day_medians(cd, d_from, d_to)
+    return {d: max(medians[d] / per_day, 1.0) for d in range(d_from, d_to + 1)}
+
+
+def day_medians(cd: Candles, d_from: int, d_to: int) -> dict:
+    """{epoch day: the median day's dollars day_sizes() divides} for days d_from..d_to."""
     n = cd.n
     first = int(cd.ts[0] // DAY)
     lo = max(first, d_from - ADAPT_DAYS - ADAPT_LOOKBACK)
@@ -116,35 +190,26 @@ def day_sizes(cd: Candles, per_day: float, d_from: int, d_to: int) -> dict:
         k = int(np.searchsorted(traded, d - lo))     # the traded days before d, no further back than the lookback
         k0 = int(np.searchsorted(traded, d - ADAPT_DAYS - ADAPT_LOOKBACK - lo))
         past = tot[traded[max(k0, k - ADAPT_DAYS):k]]
-        med = float(np.median(past)) if len(past) else float(tot[d - lo])
-        out[d] = max(med / per_day, 1.0)
+        out[d] = float(np.median(past)) if len(past) else float(tot[d - lo])
     return out
 
 
-def adaptive_bars(cd: Candles, per_day: float, start: int = 0):
+def adaptive_bars(cd: Candles, per_day: float, start: int = 0, cum=None, medians: dict = None):
     """Like dollar_bars, but each bar's size is its first minute's day size (day_sizes); every bar carries it as "z"."""
     n = cd.n
     if start >= n:
         return [], None, start
-    cum = np.cumsum(cd.d[start:n])
+    cum, never_falls = _dollars(cd, start, cum)
     days = cd.ts[start:n] // DAY
-    size_of = day_sizes(cd, per_day, int(days[0]), int(days[-1]))
-    out, i = [], 0
-    while i < len(cum):
-        base = cum[i - 1] if i > 0 else 0.0
-        z = size_of[int(days[i])]
-        j = int(np.searchsorted(cum, base + z, side="left"))
-        if j >= len(cum):
-            break
-        b = cd.bar(start + i, start + j)
-        b["z"] = int(round(z))
-        out.append(b)
-        i = j + 1
+    size_of = day_sizes(cd, per_day, int(days[0]), int(days[-1]), medians)
+    ends = np.asarray(_cut(cum, lambda i: size_of[int(days[i])], never_falls), np.int64) + start
+    starts = np.concatenate(([start], ends[:-1] + 1)) if len(ends) else ends
+    i = int(ends[-1]) + 1 if len(ends) else start
     forming = None
-    if i < len(cum):
-        forming = cd.bar(start + i, n - 1)
-        forming["z"] = int(round(size_of[int(days[i])]))
-    return out, forming, start + i
+    if i < n:
+        forming = cd.bar(i, n - 1)
+        forming["z"] = int(round(size_of[int(days[i - start])]))
+    return bars_of(cd, starts, ends, [int(round(size_of[d])) for d in days[starts - start].tolist()]), forming, i
 
 
 def period_start(ts_ms: np.ndarray, tf: str) -> np.ndarray:
@@ -157,7 +222,7 @@ def period_start(ts_ms: np.ndarray, tf: str) -> np.ndarray:
         day = ts_ms // DAY
         return ((day + 3) // 7 * 7 - 3) * DAY                 # epoch day 0 was a Thursday; weeks start Monday
     if tf == "1M":
-        return pd.to_datetime(ts_ms, unit="ms").to_period("M").to_timestamp().as_unit("ms").asi8   # ms, whatever unit pandas picked
+        return ts_ms.astype("datetime64[ms]").astype("datetime64[M]").astype("datetime64[ms]").astype(np.int64)
     raise ValueError(tf)
 
 
@@ -169,11 +234,9 @@ def time_bars(cd: Candles, tf: str, start: int = 0):
     idx = np.flatnonzero(np.diff(ps)) + 1
     starts = np.concatenate(([0], idx))
     ends = np.concatenate((idx - 1, [len(ps) - 1]))
-    bars = []
-    for a, b in zip(starts, ends):
-        bar = cd.bar(start + int(a), start + int(b))
-        bar["t"] = int(ps[a] // 1000)                          # label by period start even if the first minute is missing
-        bars.append(bar)
+    bars = bars_of(cd, starts + start, ends + start)
+    for bar, t in zip(bars, (ps[starts] // 1000).tolist()):
+        bar["t"] = t                                           # label by period start even if the first minute is missing
     return bars[:-1], bars[-1], start + int(starts[-1])
 
 
@@ -242,11 +305,13 @@ def build_all(cd: Candles) -> tuple[dict, dict]:
     medians = median_sizes(cd, auto)
     sizes = sizes_for(auto, medians)
     sets = {}
+    cum = np.cumsum(cd.d[:cd.n])                                 # every dollar set cuts the same running dollars
+    day_med = day_medians(cd, int(cd.ts[0] // DAY), int(cd.ts[cd.n - 1] // DAY))
     for s in sizes:
-        bars, forming, st = dollar_bars(cd, s)
+        bars, forming, st = dollar_bars(cd, s, cum=cum)
         sets[size_key(s)] = {"bars": bars, "forming": forming, "start": st, "size": s}
     for k in ADAPTIVE:
-        bars, forming, st = adaptive_bars(cd, k)
+        bars, forming, st = adaptive_bars(cd, k, cum=cum, medians=day_med)
         sets[f"a:{k}"] = {"bars": bars, "forming": forming, "start": st, "per_day": k}
     for tf in TIMEFRAMES:
         bars, forming, st = time_bars(cd, tf)

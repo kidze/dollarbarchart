@@ -64,10 +64,12 @@ def weighted_median(vals: np.ndarray, w: np.ndarray) -> np.ndarray:
     return out
 
 
-def trailing_dollars(ts: np.ndarray, dollars: np.ndarray) -> np.ndarray:
-    """Each minute's dollars of the WEIGHT_SPAN before it, not counting the minute itself."""
+def trailing_dollars(ts: np.ndarray, dollars: np.ndarray, start: int = 0) -> np.ndarray:
+    """Each minute's dollars of the WEIGHT_SPAN before it, not counting the minute itself. start = for the minutes
+    from this row on only (the same numbers: the running total still starts at the first row, but only these
+    minutes are looked up, which is what takes the time on years of them)."""
     cum = np.concatenate([[0.0], np.cumsum(dollars)])
-    return cum[np.arange(len(ts))] - cum[np.searchsorted(ts, ts - WEIGHT_SPAN, side="left")]
+    return cum[start:len(ts)] - cum[np.searchsorted(ts, ts[start:] - WEIGHT_SPAN, side="left")]
 
 
 def merge(frames: list, since=None, weights=None) -> pd.DataFrame:
@@ -84,13 +86,13 @@ def merge(frames: list, since=None, weights=None) -> pd.DataFrame:
             continue
         ts = f["ts"].to_numpy(np.int64)
         dol = f["turnover"].to_numpy(float)
-        say = trailing_dollars(ts, np.maximum(dol, 0.0)) if weights is None else np.full(len(ts), float(weights[j]))
-        say = np.where(dol > 0, say, 0.0)
         lo = int(np.searchsorted(ts, since)) if since is not None else 0
         if lo >= len(ts):
             continue
+        say = trailing_dollars(ts, np.maximum(dol, 0.0), lo) if weights is None else np.full(len(ts) - lo, float(weights[j]))
+        say = np.where(dol[lo:] > 0, say, 0.0)
         parts.append((ts[lo:], np.stack([f[c].to_numpy(float)[lo:] for c in PX], axis=1),
-                      f["volume"].to_numpy(float)[lo:], dol[lo:], say[lo:]))
+                      f["volume"].to_numpy(float)[lo:], dol[lo:], say))
     if not parts:
         return _empty()
     u = np.unique(np.concatenate([p[0] for p in parts]))

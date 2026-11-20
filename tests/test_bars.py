@@ -211,6 +211,78 @@ def test_upsert_replaces_same_minute_and_ignores_older():
     assert cd.dirty_from == 99
 
 
+def one_by_one(cd, kind, arg, start=0):
+    """The builders as plain loops (one search over all the running dollars and one cd.bar() per bar): what the
+    batch builders must reproduce bar for bar."""
+    n = cd.n
+    if kind == "t":
+        ps = B.period_start(cd.ts[start:n], arg)
+        idx = np.flatnonzero(np.diff(ps)) + 1
+        out = []
+        for a, b in zip(np.concatenate(([0], idx)), np.concatenate((idx - 1, [len(ps) - 1]))):
+            bar = cd.bar(start + int(a), start + int(b))
+            bar["t"] = int(ps[a] // 1000)
+            out.append(bar)
+        return out[:-1], out[-1], start + int(idx[-1] if len(idx) else 0)
+    cum = np.cumsum(cd.d[start:n])
+    days = cd.ts[start:n] // B.DAY
+    size_of = B.day_sizes(cd, arg, int(days[0]), int(days[-1])) if kind == "a" else None
+    out, i = [], 0
+    while i < len(cum):
+        z = size_of[int(days[i])] if kind == "a" else arg
+        j = int(np.searchsorted(cum, (cum[i - 1] if i else 0.0) + z, side="left"))
+        if j >= len(cum):
+            break
+        bar = cd.bar(start + i, start + j)
+        if kind == "a":
+            bar["z"] = int(round(z))
+        out.append(bar)
+        i = j + 1
+    forming = cd.bar(start + i, n - 1) if i < len(cum) else None
+    if forming and kind == "a":
+        forming["z"] = int(round(size_of[int(days[i])]))
+    return out, forming, start + i
+
+
+def test_bars_built_at_once_are_the_bars_built_one_by_one():
+    df = synthetic(45 * 1440, seed=11)
+    quiet = np.random.default_rng(5).random(len(df)) < 0.2           # minutes without a trade: the running dollars stand still
+    df.loc[quiet, ["volume", "turnover"]] = 0.0
+    df.loc[df.index[20_000:20_300], "turnover"] *= 5000              # one stretch far bigger than any size
+    cd = B.Candles(df)
+    total = float(cd.d[:cd.n].sum())
+    for start in (0, 1, 777, cd.n - 3, cd.n - 1):
+        for size in (1.0, 2e6, 3.3e7, 4.4e9, total / 3, total * 2):  # a bar a minute ... no bar at all
+            assert B.dollar_bars(cd, size, start) == one_by_one(cd, "d", size, start), (size, start)
+        for per_day in B.ADAPTIVE:
+            assert B.adaptive_bars(cd, per_day, start) == one_by_one(cd, "a", per_day, start), (per_day, start)
+        for tf in B.TIMEFRAMES:
+            assert B.time_bars(cd, tf, start) == one_by_one(cd, "t", tf, start), (tf, start)
+    sets, _ = B.build_all(cd)                                        # the build shares its running dollars and day medians
+    for k in B.ADAPTIVE:
+        got, want = sets[f"a:{k}"], one_by_one(cd, "a", k)
+        assert (got["bars"], got["forming"], got["start"]) == want
+    bars, _, _ = B.dollar_bars(cd, 3.3e7)
+    assert list(bars[0]) == ["t", "e", "o", "h", "l", "c", "d", "n"] and all(type(bars[0][f]) is int for f in "tedn")
+    cd.d[5000] = -1e9                                                # running dollars that fall (a bad row): the plain search, same answer
+    for size in (2e6, 3.3e7):
+        assert B.dollar_bars(cd, size) == one_by_one(cd, "d", size)
+    assert B.adaptive_bars(cd, 24) == one_by_one(cd, "a", 24)
+
+
+def test_prices_rounded_at_once_are_the_prices_rounded_one_by_one():
+    rng = np.random.default_rng(2)
+    vals = np.concatenate([
+        np.exp(rng.uniform(np.log(1e-12), np.log(1e9), 200_000)),    # any size of price
+        np.round(rng.uniform(10_000, 99_999, 100_000), 2),           # cents on a five-figure price: every tenth sits on a half
+        (rng.integers(100_000, 1_000_000, 50_000) + 0.5) * 10.0 ** rng.integers(-12, 4, 50_000),
+        10.0 ** rng.integers(-15, 12, 500), np.nextafter(10.0 ** rng.integers(-15, 12, 500), 0),
+        [0.0, 1e-30, 1e30, 999999.5, 9999995.0, 99999.95, 0.9999995, 123456.5, 123457.5, 1e22, 1e23, 5e-324, -1234.5678, np.inf]])
+    got, want = B.px_all(vals), [B._px(v) for v in vals.tolist()]
+    assert got == want and all(type(x) is float for x in got)
+    assert B.px_all([]) == [] and str(B.px_all([float("nan")])[0]) == "nan"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

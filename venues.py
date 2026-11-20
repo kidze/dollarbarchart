@@ -527,7 +527,15 @@ class Coinbase(Venue):
 
     def fetch(self, symbol: str, start_ms: int, end_ms: int, stop=None) -> list:
         # end is inclusive; up to 301 rows are accepted, 302 is a 400 (checked 2026-11-12)
-        return self._rows(self._candles(symbol, 60, start_ms, _minute(end_ms), stop))
+        try:
+            return self._rows(self._candles(symbol, 60, start_ms, _minute(end_ms), stop))
+        except LookupError as e:
+            # A start past Coinbase's own clock is a 400 too ("Start cannot be in the future"): the next minute asked
+            # for when this computer's clock runs a few seconds ahead of theirs. Nothing is there yet; it is not an
+            # unknown market (as which it was left out of the chart until the next launch, SOL on 2026-11-20).
+            if "in the future" in str(e):
+                return []
+            raise
 
     def latest(self, symbol: str, n: int = 3) -> list:
         now = int(time.time() * 1000)
@@ -947,11 +955,19 @@ def set_aside(venue: str, symbol: str) -> None:
 
 
 def merge_frame(df: pd.DataFrame, new: list) -> pd.DataFrame:
-    """Rows may be older or newer than the frame (reverse venues grow both ends); the newest copy of a minute wins."""
+    """Rows may be older or newer than the frame (reverse venues grow both ends); the newest copy of a minute wins.
+    A catch-up's rows all sit at the frame's end: only the part of the frame from their first minute on is joined
+    and sorted with them, the years before it are kept as they are (the same result, a tenth of the time)."""
     add = pd.DataFrame(new, columns=COLS)
     add["ts"] = add["ts"].astype("int64")
-    df = pd.concat([df, add]) if len(df) else add
-    return df.drop_duplicates("ts", keep="last").sort_values("ts").reset_index(drop=True)
+    if not len(df):
+        return add.drop_duplicates("ts", keep="last").sort_values("ts").reset_index(drop=True)
+    ts = df["ts"].to_numpy(np.int64)
+    k = int(np.searchsorted(ts, int(add["ts"].min()))) if len(add) else len(ts)
+    if 0 < k and bool((np.diff(ts) > 0).all()):                  # (a frame in order, one row a minute: every file this app wrote)
+        tail = pd.concat([df.iloc[k:], add]).drop_duplicates("ts", keep="last").sort_values("ts")
+        return pd.concat([df.iloc[:k], tail], ignore_index=True)
+    return pd.concat([df, add]).drop_duplicates("ts", keep="last").sort_values("ts").reset_index(drop=True)
 
 
 # ---------------------------------------------------------------- the generic, resumable sync

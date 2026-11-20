@@ -817,6 +817,71 @@ def test_the_lone_rule_from_a_start_row_matches_the_full_run():
         part, _ = C.despike(merged, [big, thin], start=start)
         assert part.iloc[start:].equals(full.iloc[start:]) and part.iloc[:start].equals(merged.iloc[:start])
 
+def test_new_rows_joined_at_the_frames_end_match_the_full_join():
+    def full_join(df, new):                                          # every row sorted again, the newest copy of a minute kept
+        add = pd.DataFrame(new, columns=V.COLS)
+        add["ts"] = add["ts"].astype("int64")
+        return pd.concat([df, add]).drop_duplicates("ts", keep="last").sort_values("ts").reset_index(drop=True)
+    df = series(T0, 5000, seed=21)
+    row = lambda i, px=5.0: [T0 + i * M, px, px + 1, px - 1, px, 2, 10]          # (whole numbers: a column of ints joins floats)
+    cases = {"the last minute again and ten more": [row(i) for i in range(4999, 5010)],
+             "newer only, after a hole": [row(i) for i in range(5200, 5210)],
+             "out of order, one minute twice": [row(5003), row(4998, 7.0), row(5001), row(4998, 9.0)],
+             "a hole filled in the middle": [row(i, 3.0) for i in range(2500, 2560)],
+             "before the first row": [row(i) for i in range(-5, 3)],
+             "the first row itself": [row(0, 2.0)]}
+    for name, new in cases.items():
+        got, want = V.merge_frame(df, new), full_join(df, new)
+        pd.testing.assert_frame_equal(got, want, obj=name)
+        assert got["ts"].is_monotonic_increasing and got["ts"].is_unique, name
+    shuffled = df.sample(frac=1, random_state=1)                     # a frame out of order takes the full join
+    pd.testing.assert_frame_equal(V.merge_frame(shuffled, cases["the last minute again and ten more"]),
+                                  full_join(shuffled, cases["the last minute again and ten more"]))
+    assert V.merge_frame(df.iloc[:0], [row(2), row(1), row(2, 8.0)])["close"].tolist() == [5.0, 8.0]
+
+
+def test_a_days_dollars_for_the_newest_rows_only_are_the_same_numbers():
+    rng = np.random.default_rng(3)
+    ts = T0 + np.sort(rng.choice(40_000, 9000, replace=False)) * M   # minutes with holes, a month of them
+    d = rng.lognormal(10, 2, len(ts))
+    whole = C.trailing_dollars(ts, d)
+    for k in (0, 1, 4321, len(ts) - 1, len(ts)):
+        assert np.array_equal(C.trailing_dollars(ts, d, k), whole[k:])
+
+
+def test_coinbase_start_in_the_future_is_nothing_yet_not_an_unknown_market():
+    scratch()
+    v = V.Coinbase()
+    skew = 7000                                                      # this computer's clock runs 7 s ahead of the exchange's
+    hist = series(T0, 400, seed=31)
+    asked = []
+
+    def candles(symbol, granularity, start_ms, end_ms, stop=None, attempts=6):
+        asked.append(start_ms)
+        theirs = int(CLOCK[0] * 1000) - skew
+        if start_ms > theirs:
+            raise LookupError('HTTP 400 {"message":"Start cannot be in the future"}')
+        if granularity != 60:                                        # the first day's daily candle
+            return [[T0 // 1000, 1, 1, 1, 1, 1]]
+        if symbol != "T-USD":
+            raise LookupError("HTTP 404 {\"message\":\"NotFound\"}")
+        sub = hist[(hist["ts"] >= start_ms) & (hist["ts"] <= min(end_ms, theirs))]
+        return [[int(r.ts) // 1000, r.low, r.high, r.open, r.close, r.volume] for r in sub.itertuples()]
+    v._candles = candles
+    v.first_ms = lambda symbol: T0
+    newest = int(hist["ts"].iloc[-1])
+    CLOCK[0] = (newest + M) / 1000 + 3                               # 3 s into the next minute here: theirs still shows the one before
+    res = V.sync(v, "T-USD")
+    assert res["result"] == "done" and res["n"] == 400 and res["last"] == newest
+    assert max(asked) == newest + M                                  # the minute their clock has not reached was asked for
+    assert v.fetch("T-USD", newest + M, newest + 5 * M) == []
+    try:
+        v.fetch("NOPE-USD", T0, T0 + M)
+        assert False, "an unknown market is still an error"
+    except LookupError:
+        pass
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
