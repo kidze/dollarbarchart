@@ -1,10 +1,16 @@
-/* Drawing tools, TradingView style. For now one tool: the trend line.
+/* Drawing tools, TradingView style: the trend line and the rectangle.
 
-   Draw: pick the tool (left toolbar or Alt+T), then click two points, or press, drag and release. Holding Shift keeps the
-   line horizontal (while placing it or dragging an end; while moving a whole line, Shift keeps the move straight across or
-   straight up and down). Hover a line to see its ends; click to select it; drag the line to move it or an end to reshape
-   it; Delete removes it; double-click (or the gear) opens its settings; Ctrl+Z / Ctrl+Y undo and redo; Esc cancels.
-   The floating toolbar of the selected line changes color (with opacity), width and style.
+   Draw: pick the tool (left toolbar, Alt+T for the line, Alt+Shift+R for the rectangle), then click two points, or press,
+   drag and release. Holding Shift keeps a line horizontal and makes a rectangle a square (while placing it or dragging an
+   end or corner; while moving a whole drawing, Shift keeps the move straight across or straight up and down). Hover a
+   drawing to see its grips; click to select it; drag it to move it, or a grip to reshape it (a rectangle has eight: a
+   corner moves two sides, a side's middle moves that side); Delete removes it; double-click (or the gear) opens its
+   settings; Ctrl+Z / Ctrl+Y undo and redo; Esc cancels. The floating toolbar of the selected drawing changes color (with
+   opacity), width and style. A rectangle with a background is picked up anywhere inside it, one without by its border.
+
+   Magnet (left toolbar): while a point is being placed or a grip dragged, its price snaps to the open, high, low or close
+   of the bar under the mouse when the mouse is within MAGNET pixels of it (TradingView's weak magnet); a small ring shows
+   where it caught. Holding Ctrl flips the magnet for as long as it is held.
 
    Drawings are kept per market and anchored by time + price, so they sit on the same moments whatever bar size or time
    frame is shown (the x-axis is bar order, app.timeToLogical places a time on it). They are saved to data/drawings.json
@@ -16,16 +22,24 @@
 (function(){
   'use strict';
   var HIT = 6, HANDLE = 5.5, DRAG_MIN = 4;                       // px: hit distance, handle radius, a press that moves less is a click
-  var BASE_STYLE = {color:'rgba(41,98,255,1)', width:2, dash:0, extL:false, extR:false, mid:false, labels:false, stats:false};
+  var MAGNET = 10;                                               // px: how near a bar's open, high, low or close the mouse must be to snap
+  // The kinds of drawing: each is two points {t, p} and a style. A new one starts from the last style used for its kind.
+  // The rectangle's colors are TradingView's own defaults for it.
+  var TYPES = {
+    trendline: {name: 'Trend line', base: {color:'rgba(41,98,255,1)', width:2, dash:0, extL:false, extR:false, mid:false, labels:false, stats:false}},
+    rectangle: {name: 'Rectangle',  base: {color:'rgba(156,39,176,1)', width:1, dash:0, fill:true, bg:'rgba(156,39,176,0.2)', extL:false, extR:false}}
+  };
   var DASHES = [[], [7, 5], [2, 3]];                             // solid, dashed, dotted (scaled by width)
   var $ = UI.$;
 
   window.DBCDraw = function(app){
     var chart = app.chart, series = app.series, ts = chart.timeScale(), store = app.store, host = $('chart');
-    var ui = Object.assign({stay:false, lock:false, hide:false, dtb:null}, store.get('drawUi') || {});
-    var defaults = Object.assign({}, BASE_STYLE, (store.get('drawDefaults') || {}).trendline || {});
+    var ui = Object.assign({stay:false, lock:false, hide:false, magnet:false, dtb:null}, store.get('drawUi') || {});
+    var defaults = {};
+    Object.keys(TYPES).forEach(function(k){ defaults[k] = Object.assign({}, TYPES[k].base, (store.get('drawDefaults') || {})[k] || {}); });
     var items = [];
-    var tool = 'cursor', selected = null, hover = null, placing = null, drag = null, shift = false, lastMove = null;
+    var tool = 'cursor', selected = null, hover = null, placing = null, drag = null, shift = false, ctrl = false, lastMove = null;
+    var mark = null;                                             // the point the magnet caught, shown as a ring while placing or reshaping
     var undo = [], redo = [], lastDown = null;
     var colors = {get: function(){ return store.get('customColors') || []; }, set: function(l){ store.set('customColors', l); }};
 
@@ -47,6 +61,38 @@
       if (l === null || p === null) return null;
       var t = app.logicalToTime(Math.round(l)); return t === null ? null : {t:t, p:p};
     }
+    // The magnet (weak, like TradingView's): the anchor under the mouse, its price moved onto the open, high, low or close
+    // of the bar under the mouse when one of them is within MAGNET pixels. Ctrl flips the toolbar's switch while held.
+    function magnetOn(){ return !!ui.magnet !== ctrl; }
+    function anchorAt(x, y, plain){                              // plain: no snapping (Shift rules decide the price, or it is not used)
+      var a = toAnchor(x, y); mark = null;
+      if (!a || plain || !magnetOn()) return a;
+      var l = ts.coordinateToLogical(x), r = l === null ? null : app.rows()[Math.round(l)];
+      if (!r) return a;                                          // past the newest bar: nothing to snap to
+      var best = null, near = MAGNET;
+      [r.o, r.h, r.l, r.c].forEach(function(v){
+        var yv = series.priceToCoordinate(v), dist = yv === null ? Infinity : Math.abs(yv - y);
+        if (dist <= near) { near = dist; best = v; }
+      });
+      if (best !== null) { a.p = best; mark = {t: a.t, p: best}; }
+      return a;
+    }
+    function squared(p, f){                                      // Shift on a rectangle: a square on screen, from its fixed corner f
+      if (!f) return p;
+      var dx = p.x - f.x, dy = p.y - f.y, s = Math.max(Math.abs(dx), Math.abs(dy));
+      return {x: f.x + (dx < 0 ? -s : s), y: f.y + (dy < 0 ? -s : s)};
+    }
+    // A rectangle on screen: its box (an extended side runs to the pane's edge) and its eight grips. A grip names the end
+    // whose time it moves (hx) and the end whose price it moves (hy): a corner has both, the middle of a side has one.
+    function box(a, b, s, w){
+      var x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x);
+      return {x0: s.extL ? Math.min(0, x0) : x0, x1: s.extR ? Math.max(w, x1) : x1, y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y)};
+    }
+    function grips(a, b){
+      var mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      return [{x:a.x, y:a.y, hx:0, hy:0}, {x:b.x, y:b.y, hx:1, hy:1}, {x:a.x, y:b.y, hx:0, hy:1}, {x:b.x, y:a.y, hx:1, hy:0},
+              {x:a.x, y:my, hx:0, hy:null}, {x:b.x, y:my, hx:1, hy:null}, {x:mx, y:a.y, hx:null, hy:0}, {x:mx, y:b.y, hx:null, hy:1}];
+    }
     function segDist(px, py, a, b){
       var dx = b.x - a.x, dy = b.y - a.y, len = dx*dx + dy*dy, u = len ? ((px - a.x)*dx + (py - a.y)*dy) / len : 0;
       u = Math.max(0, Math.min(1, u)); var x = a.x + u*dx - px, y = a.y + u*dy - py; return Math.sqrt(x*x + y*y);
@@ -63,12 +109,26 @@
       }
       return [s.extL ? stretch(a, -dx, -dy) : a, s.extR ? stretch(b, dx, dy) : b];
     }
+    // What is under the mouse: {d, part}. part is 0 or 1 (a line's end), a rectangle's grip {hx, hy}, 'line' (the line, or
+    // a rectangle's border) or 'fill' (inside a rectangle that has a background). Lines, borders and grips come first,
+    // whatever the stacking: a line inside a filled rectangle can still be picked up.
     function hitAt(x, y){
       if (ui.hide) return null;
-      var w = ts.width(), h = paneH();
+      var w = ts.width(), h = paneH(), inside = null;
       for (var i = items.length - 1; i >= 0; i--) {
         var d = items[i], a = toPx(d.points[0]), b = toPx(d.points[1]);
         if (!a || !b) continue;
+        if (d.type === 'rectangle') {
+          if (d === selected || d === hover) {
+            var g = grips(a, b);
+            for (var k = 0; k < g.length; k++) if (Math.hypot(x - g[k].x, y - g[k].y) <= HANDLE + 3) return {d:d, part:{hx:g[k].hx, hy:g[k].hy}};
+          }
+          var r = box(a, b, d.style, w);
+          if (x < r.x0 - HIT || x > r.x1 + HIT || y < r.y0 - HIT || y > r.y1 + HIT) continue;
+          if (Math.abs(x - r.x0) <= HIT || Math.abs(x - r.x1) <= HIT || Math.abs(y - r.y0) <= HIT || Math.abs(y - r.y1) <= HIT) return {d:d, part:'line'};
+          if (d.style.fill && !inside) inside = {d:d, part:'fill'};
+          continue;
+        }
         if (d === selected || d === hover) {
           if (Math.hypot(x - a.x, y - a.y) <= HANDLE + 3) return {d:d, part:0};
           if (Math.hypot(x - b.x, y - b.y) <= HANDLE + 3) return {d:d, part:1};
@@ -76,7 +136,7 @@
         var sp = span(a, b, d.style, w, h);
         if (segDist(x, y, sp[0], sp[1]) <= HIT) return {d:d, part:'line'};
       }
-      return null;
+      return inside;
     }
 
     // ------------------------------------------------------------ painting (a series primitive: above the candles, under the crosshair)
@@ -102,7 +162,9 @@
       all.forEach(function(d){
         var a = toPx(d.points[0]), b = toPx(d.points[1]); if (!a || !b) return;
         var c = UI.parse(d.style.color) || {r:41,g:98,b:255,a:1};
-        out.push({d:d, a:a, b:b, sp:span(a, b, d.style, size.width, size.height), solid:'rgb(' + c.r + ',' + c.g + ',' + c.b + ')',
+        out.push({d:d, a:a, b:b, solid:'rgb(' + c.r + ',' + c.g + ',' + c.b + ')',
+                  sp: d.type === 'rectangle' ? null : span(a, b, d.style, size.width, size.height),
+                  box: d.type === 'rectangle' ? box(a, b, d.style, size.width) : null,
                   ink: (c.r*299 + c.g*587 + c.b*114) / 1000 > 150 ? '#111' : '#fff',
                   hot: d === selected || d === hover || (placing && placing.d === d)});
       });
@@ -112,8 +174,35 @@
       var bg = app.settings ? app.settings.look().bg : null, c = UI.parse(bg ? (bg.type === 'gradient' ? bg.bottom : bg.color) : '#0b0c0e');
       return c ? 'rgb(' + c.r + ',' + c.g + ',' + c.b + ')' : '#0b0c0e';
     }
+    function grip(ctx, hr, vr, p, fill, stroke, square){         // a round grip (a line's end, a corner) or a square one (a side's middle)
+      var r = HANDLE * hr;
+      ctx.beginPath();
+      if (square) ctx.rect(p.x * hr - r * 0.85, p.y * vr - r * 0.85, r * 1.7, r * 1.7); else ctx.arc(p.x * hr, p.y * vr, r, 0, 2*Math.PI);
+      ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = Math.max(1, Math.round(1.5 * hr)); ctx.strokeStyle = stroke; ctx.stroke();
+    }
+    function paintBox(ctx, hr, vr, q){                           // a rectangle: background, then the border (no border on an extended side)
+      var s = q.d.style, lw = Math.max(1, Math.round(s.width * hr)), half = lw % 2 ? 0.5 : 0, r = q.box;
+      var lim = 1e5;                                             // far off screen is far enough (a canvas goes wrong on huge numbers)
+      var X0 = Math.round(Math.max(-lim, Math.min(lim, r.x0 * hr))) + half, X1 = Math.round(Math.max(-lim, Math.min(lim, r.x1 * hr))) + half;
+      var Y0 = Math.round(Math.max(-lim, Math.min(lim, r.y0 * vr))) + half, Y1 = Math.round(Math.max(-lim, Math.min(lim, r.y1 * vr))) + half;
+      if (s.fill) { ctx.fillStyle = s.bg; ctx.fillRect(X0, Y0, X1 - X0, Y1 - Y0); }
+      ctx.lineWidth = lw; ctx.strokeStyle = s.color; ctx.lineCap = 'butt';
+      ctx.setLineDash(DASHES[s.dash].map(function(v){ return v * Math.max(1, s.width * 0.75) * hr; }));
+      ctx.beginPath();
+      ctx.moveTo(X0, Y0); ctx.lineTo(X1, Y0); ctx.moveTo(X0, Y1); ctx.lineTo(X1, Y1);
+      if (!s.extL) { ctx.moveTo(X0, Y0); ctx.lineTo(X0, Y1); }
+      if (!s.extR) { ctx.moveTo(X1, Y0); ctx.lineTo(X1, Y1); }
+      ctx.stroke(); ctx.setLineDash([]);
+      if (q.hot) { var fill = handleFill(); grips(q.a, q.b).forEach(function(g){ grip(ctx, hr, vr, g, fill, q.solid, g.hx === null || g.hy === null); }); }
+    }
+    function paintMark(ctx, hr, vr){                             // where the magnet caught: a ring on that open, high, low or close
+      var q = mark && !ui.hide ? toPx(mark) : null; if (!q) return;
+      ctx.beginPath(); ctx.arc(q.x * hr, q.y * vr, 4 * hr, 0, 2*Math.PI);
+      ctx.lineWidth = Math.max(1, Math.round(1.5 * hr)); ctx.strokeStyle = '#e6e8ec'; ctx.stroke();
+    }
     function paintLines(ctx, hr, vr, list){                      // device pixels: crisp at any screen scale
       list.forEach(function(q){
+        if (q.box) { paintBox(ctx, hr, vr, q); return; }
         var s = q.d.style, lw = Math.max(1, Math.round(s.width * hr)), half = lw % 2 ? 0.5 : 0;
         var X1 = q.sp[0].x * hr, Y1 = q.sp[0].y * vr, X2 = q.sp[1].x * hr, Y2 = q.sp[1].y * vr;
         if (Math.abs(Y1 - Y2) < 0.5) Y1 = Y2 = Math.round(Y1) + half;     // horizontal and vertical lines on whole pixels
@@ -123,14 +212,9 @@
         ctx.beginPath(); ctx.moveTo(X1, Y1); ctx.lineTo(X2, Y2); ctx.stroke();
         ctx.setLineDash([]);
         if (s.mid) { ctx.fillStyle = q.solid; ctx.beginPath(); ctx.arc((q.a.x + q.b.x)/2 * hr, (q.a.y + q.b.y)/2 * vr, 3 * hr, 0, 2*Math.PI); ctx.fill(); }
-        if (q.hot) {
-          var fill = handleFill();
-          [q.a, q.b].forEach(function(p){
-            ctx.beginPath(); ctx.arc(p.x * hr, p.y * vr, HANDLE * hr, 0, 2*Math.PI);
-            ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = Math.max(1, Math.round(1.5 * hr)); ctx.strokeStyle = q.solid; ctx.stroke();
-          });
-        }
+        if (q.hot) { var fill = handleFill(); [q.a, q.b].forEach(function(p){ grip(ctx, hr, vr, p, fill, q.solid); }); }
       });
+      paintMark(ctx, hr, vr);
     }
     function paintLabels(ctx, size, list){                       // CSS pixels: text keeps the page's font size
       function seen(p){ return p.x >= -1 && p.x <= size.width + 1 && p.y >= -1 && p.y <= size.height + 1; }   // labels follow their end off screen
@@ -248,8 +332,8 @@
     addEventListener('pagehide', function(){ flush(true); });
 
     function clean(d){                                           // a saved drawing this version can show (others stay on the server untouched)
-      if (!d || d.type !== 'trendline' || typeof d.id !== 'string' || !Array.isArray(d.points) || d.points.length !== 2) return null;
-      d.style = Object.assign({}, BASE_STYLE, d.style || {}); return d;
+      if (!d || !TYPES[d.type] || typeof d.id !== 'string' || !Array.isArray(d.points) || d.points.length !== 2) return null;
+      d.style = Object.assign({}, TYPES[d.type].base, d.style || {}); return d;
     }
     function editing(){ return placing || drag || document.querySelector('.modal'); }
     function fetchList(m, force){
@@ -310,11 +394,14 @@
     function buttons(){ $('bUndo').disabled = !undo.length; $('bRedo').disabled = !redo.length; }
     function newId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
     function saveUi(){ store.set('drawUi', ui); }
-    function setDefaults(style){ defaults = Object.assign({}, style); var dd = store.get('drawDefaults') || {}; dd.trendline = defaults; store.set('drawDefaults', dd); }
+    function setDefaults(d){                                     // the next new drawing of this kind looks like this one
+      defaults[d.type] = Object.assign({}, d.style);
+      var dd = Object.assign({}, store.get('drawDefaults') || {}); dd[d.type] = defaults[d.type]; store.set('drawDefaults', dd);
+    }
 
     function setMarket(key){
       if (mk) { mk.items = items; save(mk); left.push(mk); }      // the market being left saves in the background
-      placing = null; drag = null; host.style.cursor = tool === 'cursor' ? '' : 'crosshair';
+      placing = null; drag = null; mark = null; host.style.cursor = tool === 'cursor' ? '' : 'crosshair';
       mk = left.filter(function(m){ return m.key === key; })[0] || {key:key, base:{}, rev:null, items:[], loaded:false, loadTries:0, tries:0};
       left = left.filter(function(m){ return m !== mk; });
       items = mk.items; selected = hover = null; undo = []; redo = []; buttons(); redrawAll(); status();
@@ -323,7 +410,7 @@
 
     // ------------------------------------------------------------ tools and the left toolbar
     function setTool(t){
-      placing = null;
+      placing = null; mark = null;
       tool = t;
       host.style.cursor = t === 'cursor' ? '' : 'crosshair';
       Array.prototype.forEach.call(document.querySelectorAll('#tools [data-tool]'), function(b){ b.classList.toggle('on', b.dataset.tool === t); });
@@ -333,10 +420,13 @@
     Array.prototype.forEach.call(document.querySelectorAll('#tools [data-tool]'), function(b){ b.onclick = function(){ setTool(b.dataset.tool); }; });
     function sideButtons(){
       $('tStay').classList.toggle('on', ui.stay); $('tLock').classList.toggle('on', ui.lock); $('tHide').classList.toggle('on', ui.hide);
+      $('tMagnet').classList.toggle('on', !!ui.magnet);
+      $('tMagnet').title = 'Magnet ' + (ui.magnet ? 'on' : 'off') + ': while drawing, a point snaps to a nearby open, high, low or close (hold Ctrl to flip it)';
       $('tHide').title = (ui.hide ? 'Show all drawings' : 'Hide all drawings') + ' (Ctrl+Alt+H)';
       $('tLock').title = ui.lock ? 'Unlock all drawings' : 'Lock all drawings';
     }
     function toggleHide(){ ui.hide = !ui.hide; if (ui.hide) { selected = hover = null; } saveUi(); sideButtons(); redrawAll(); }
+    $('tMagnet').onclick = function(){ ui.magnet = !ui.magnet; saveUi(); sideButtons(); };
     $('tStay').onclick = function(){ ui.stay = !ui.stay; saveUi(); sideButtons(); };
     $('tLock').onclick = function(){ ui.lock = !ui.lock; saveUi(); sideButtons(); redrawAll(); };
     $('tHide').onclick = toggleHide;
@@ -367,9 +457,12 @@
     function toolbar(){
       var d = selected;
       if (!d || ui.hide || tool !== 'cursor') { dtb.className = ''; return; }
-      var s = d.style, locked = !!d.locked;
+      var s = d.style, locked = !!d.locked, rect = d.type === 'rectangle';
+      var sw = function(c){ return '<i class="sw chk"><i style="display:block;width:100%;height:100%;border-radius:.15rem;background:' + c + '"></i></i>'; };
       dtb.innerHTML = '<i class="grip" title="Drag to move this toolbar"></i>' +
-        '<button data-a="color" title="Line color"><i class="sw chk"><i style="display:block;width:100%;height:100%;border-radius:.15rem;background:' + s.color + '"></i></i></button>' +
+        (rect ? '<button data-a="color" title="Border color"><i class="sw ring" style="border-color:' + s.color + '"></i></button>' +
+                '<button data-a="bg" title="Background' + (s.fill ? '' : ' (off)') + '">' + sw(s.fill ? s.bg : 'transparent') + '</button>'
+              : '<button data-a="color" title="Line color">' + sw(s.color) + '</button>') +
         '<button data-a="width" title="Line width">' + lineSvg(Math.min(s.width, 4), 0, 'width:1.6rem') + '<span>' + s.width + 'px</span></button>' +
         '<button data-a="dash" title="Line style">' + lineSvg(2, s.dash, 'width:1.8rem') + '</button>' +
         '<button data-a="settings" title="Settings">' + ICON.gear + '</button>' +
@@ -387,14 +480,14 @@
       dtb.style.left = x + 'px'; dtb.style.top = Math.max(0, Math.min(wrap.clientHeight - h, y)) + 'px';
     }
     ts.subscribeSizeChange(function(){ if (selected) toolbar(); });   // the window was resized: keep it inside and clear of the banner
-    function restyle(patch){ if (!selected) return; remember(); Object.assign(selected.style, patch); setDefaults(selected.style); changed(); }
+    function restyle(patch){ if (!selected) return; remember(); Object.assign(selected.style, patch); setDefaults(selected); changed(); }
     dtb.addEventListener('click', function(e){
       var b = e.target.closest('button'); if (!b || !selected) return;
       var a = b.dataset.a, d = selected;
-      if (a === 'color') {
-        var before = snapshot(), touched = false;
-        UI.pickColor(b, {value: d.style.color, custom: colors.get(), onCustom: colors.set,
-          onChange: function(v){ if (!touched) { pushUndo(before); touched = true; } d.style.color = v; setDefaults(d.style); changed(); }});
+      if (a === 'color' || a === 'bg') {                         // the line or border color; a rectangle's background (picking one switches it on)
+        var before = snapshot(), touched = false, key = a === 'bg' ? 'bg' : 'color';
+        UI.pickColor(b, {value: d.style[key], custom: colors.get(), onCustom: colors.set,
+          onChange: function(v){ if (!touched) { pushUndo(before); touched = true; } d.style[key] = v; if (key === 'bg') d.style.fill = true; setDefaults(d); changed(); }});
       }
       else if (a === 'width') UI.menu(b, [1,2,3,4].map(function(w){ return {html: lineSvg(w, 0) + w + 'px', on: d.style.width === w, onClick: function(){ restyle({width:w}); }}; }));
       else if (a === 'dash') UI.menu(b, ['Line','Dashed line','Dotted line'].map(function(n, i){ return {html: lineSvg(2, i) + n, on: d.style.dash === i, onClick: function(){ restyle({dash:i}); }}; }));
@@ -413,25 +506,32 @@
     });
     function remove(d){ remember(); items = items.filter(function(x){ return x !== d; }); if (selected === d) selected = null; hover = null; changed(); }
 
-    // ------------------------------------------------------------ trend line settings dialog (double-click a line, or the gear)
+    // ------------------------------------------------------------ a drawing's settings dialog (double-click it, or the gear)
     function openSettings(d){
-      var before = snapshot(), orig = JSON.parse(JSON.stringify(d));
+      var before = snapshot(), orig = JSON.parse(JSON.stringify(d)), rect = d.type === 'rectangle';
       function live(){ redrawAll(); }
       function check(body, name, field){
         var row = UI.el('div', 'row'), lab = UI.el('label', 'name'), cb = UI.el('input'); cb.type = 'checkbox'; cb.checked = !!d.style[field];
         cb.onchange = function(){ d.style[field] = cb.checked; live(); };
         lab.appendChild(cb); lab.appendChild(document.createTextNode(name)); row.appendChild(lab); body.appendChild(row);
+        return row;
       }
-      UI.dialog({title: 'Trend line', tabs: [
+      UI.dialog({title: TYPES[d.type].name, tabs: [
         {name:'Style', render: function(body){
           var row = UI.el('div', 'row'), ctl = UI.el('div', 'ctl');
-          row.appendChild(UI.el('span', 'name', 'Line'));
+          row.appendChild(UI.el('span', 'name', rect ? 'Border' : 'Line'));
           ctl.appendChild(UI.swatch(d.style.color, function(v){ d.style.color = v; live(); }, colors));
           var w = UI.el('select', null, [1,2,3,4].map(function(v){ return '<option value="' + v + '">' + v + 'px</option>'; }).join('')); w.value = d.style.width;
           w.onchange = function(){ d.style.width = +w.value; live(); };
           var st = UI.el('select', null, '<option value="0">Solid</option><option value="1">Dashed</option><option value="2">Dotted</option>'); st.value = d.style.dash;
           st.onchange = function(){ d.style.dash = +st.value; live(); };
           ctl.appendChild(w); ctl.appendChild(st); row.appendChild(ctl); body.appendChild(row);
+          if (rect) {
+            var bgRow = check(body, 'Background', 'fill'), bgCtl = UI.el('div', 'ctl');
+            bgCtl.appendChild(UI.swatch(d.style.bg, function(v){ d.style.bg = v; live(); }, colors)); bgRow.appendChild(bgCtl);
+            check(body, 'Extend left', 'extL'); check(body, 'Extend right', 'extR');
+            return;
+          }
           check(body, 'Extend left line', 'extL'); check(body, 'Extend right line', 'extR');
           check(body, 'Middle point', 'mid'); check(body, 'Price labels', 'labels'); check(body, 'Stats', 'stats');
         }},
@@ -449,7 +549,7 @@
       ],
       onOk: function(){
         if (JSON.stringify(d) !== JSON.stringify(orig)) pushUndo(before);
-        if (JSON.stringify(d.style) !== JSON.stringify(orig.style)) setDefaults(d.style);   // the next new line looks like this one
+        if (JSON.stringify(d.style) !== JSON.stringify(orig.style)) setDefaults(d);   // the next new one of its kind looks like this one
         changed();
       },
       onCancel: function(){ d.points = orig.points; d.style = orig.style; d.locked = orig.locked; changed(); }});
@@ -460,29 +560,37 @@
     function inPane(p){ return p.x >= 0 && p.y >= 0 && p.x < ts.width() && p.y < paneH(); }
     function take(e){ e.preventDefault(); e.stopPropagation(); }  // the chart never sees this press: no pan, no click
     function horizontal(pt, other){ return shift && other ? {t: pt.t, p: other.p} : pt; }
+    // The second point of the drawing being placed, at mouse position p. Shift decides first (a line stays level, a
+    // rectangle stays square); without it, the magnet.
+    function endAt(p){
+      var d = placing.d, q = shift && d.type === 'rectangle' ? squared(p, toPx(d.points[0])) : p;
+      var a = anchorAt(q.x, q.y, shift); if (!a) return;
+      d.points[1] = d.type === 'rectangle' ? a : horizontal(a, d.points[0]);
+    }
 
     host.addEventListener('mousedown', function(e){
       if (e.button !== 0 || UI.busy()) return;
       var ae = document.activeElement;                           // the keys go back to the chart (Delete, Esc, Ctrl+Z…), not to a menu or button
       if (ae && /INPUT|SELECT|TEXTAREA|BUTTON/.test(ae.tagName)) ae.blur();
       var p = local(e); if (!inPane(p)) return;
-      shift = e.shiftKey;
-      if (tool === 'trendline') {
+      shift = e.shiftKey; ctrl = e.ctrlKey || e.metaKey;
+      if (tool !== 'cursor') {
         take(e);
-        var a = toAnchor(p.x, p.y); if (!a) return;
-        if (placing) { placing.d.points[1] = horizontal(a, placing.d.points[0]); finish(); return; }   // second click
+        if (placing) { endAt(p); finish(); return; }             // second click
+        var a = anchorAt(p.x, p.y); if (!a) return;
         if (ui.hide || ui.lock) { ui.hide = ui.lock = false; saveUi(); sideButtons(); }   // a new drawing shows them again, like TradingView
-        placing = {d: {id:newId(), type:'trendline', points:[a, a], style:Object.assign({}, defaults)}, from:p, down:true, dragged:false};
+        placing = {d: {id:newId(), type:tool, points:[a, {t:a.t, p:a.p}], style:Object.assign({}, defaults[tool])}, from:p, down:true, dragged:false};
         redrawAll(); return;
       }
       var h = hitAt(p.x, p.y);
       if (!h) { lastDown = null; if (selected) { selected = null; redrawAll(); } return; }   // empty chart: deselect and let it pan
-      take(e);
+      var free = !ui.lock && !h.d.locked;
+      if (free || h.part !== 'fill') take(e);                    // inside a locked rectangle the chart still pans under the mouse (a click selects it)
       var dbl = e.detail >= 2 && lastDown && lastDown.d.id === h.d.id;  // double-click = settings
       lastDown = dbl ? null : {d:h.d};
       selected = h.d; hover = null;
       if (dbl) { drag = null; redrawAll(); openSettings(h.d); return; }
-      if (!ui.lock && !h.d.locked) {
+      if (free) {
         drag = {d:h.d, part:h.part, from:p, before:snapshot(), moved:false, l0: ts.coordinateToLogical(p.x),
                 orig: h.d.points.map(function(pt){ var q = toPx(pt); return {l: q.l, y: q.y}; })};
       }
@@ -493,44 +601,58 @@
       lastMove = p;
       if (placing) {
         if (placing.down && Math.hypot(p.x - placing.from.x, p.y - placing.from.y) > DRAG_MIN) placing.dragged = true;
-        var a = toAnchor(p.x, p.y); if (a) placing.d.points[1] = horizontal(a, placing.d.points[0]);
+        endAt(p);
         requestUpdate(); return;
       }
       if (drag) {
         if (!drag.moved && Math.hypot(p.x - drag.from.x, p.y - drag.from.y) <= DRAG_MIN) return;
         if (!drag.moved) { drag.moved = true; host.style.cursor = 'grabbing'; }
         var d = drag.d;
-        if (drag.part === 'line') {
+        if (drag.part === 'line' || drag.part === 'fill') {      // the whole drawing moves (no magnet: nothing of it is being placed)
           var l1 = ts.coordinateToLogical(p.x); if (l1 === null || drag.l0 === null) return;
           var dl = Math.round(l1 - drag.l0), dy = p.y - drag.from.y;
           if (shift) { if (Math.abs(p.x - drag.from.x) >= Math.abs(dy)) dy = 0; else dl = 0; }   // Shift: straight across or straight up/down
           var pts = drag.orig.map(function(o){ var pr = series.coordinateToPrice(o.y + dy), t = app.logicalToTime(o.l + dl); return pr === null || t === null ? null : {t:t, p:pr}; });
           if (pts[0] && pts[1]) d.points = pts;
+        } else if (typeof drag.part === 'object') {              // a rectangle's grip: a corner moves a time and a price, a side's middle one of them
+          var g = drag.part, corner = g.hx !== null && g.hy !== null, q = p;
+          if (shift && corner) q = squared(p, toPx({t: d.points[1 - g.hx].t, p: d.points[1 - g.hy].p}));   // square from the opposite corner
+          var a3 = anchorAt(q.x, q.y, g.hy === null || (shift && corner)); if (!a3) return;
+          var np = d.points.map(function(pt){ return {t: pt.t, p: pt.p}; });
+          if (g.hx !== null) np[g.hx].t = a3.t;
+          if (g.hy !== null) np[g.hy].p = a3.p;
+          d.points = np;
         } else {
-          var a2 = toAnchor(p.x, p.y); if (!a2) return;
+          var a2 = anchorAt(p.x, p.y, shift); if (!a2) return;
           d.points[drag.part] = horizontal(a2, d.points[1 - drag.part]);
         }
         requestUpdate(); return;
       }
-      if (tool === 'cursor' && !UI.busy()) {                     // hover: show the ends of the line under the mouse
+      if (tool !== 'cursor') {                                   // a tool is up, nothing placed yet: show where the magnet would catch the first point
+        var was = mark;
+        if (inPane(p) && !UI.busy()) anchorAt(p.x, p.y); else mark = null;
+        if ((was && was.t) !== (mark && mark.t) || (was && was.p) !== (mark && mark.p)) requestUpdate();
+        return;
+      }
+      if (!UI.busy()) {                                          // hover: show the grips of the drawing under the mouse
         var h = inPane(p) ? hitAt(p.x, p.y) : null, d2 = h ? h.d : null;
         if (d2 !== hover) { hover = d2; requestUpdate(); }
       }
     }
     document.addEventListener('mousemove', function(e){
-      if (!placing && !drag && !host.contains(e.target)) { if (hover) { hover = null; requestUpdate(); } return; }
-      shift = e.shiftKey; move(local(e));
+      if (!placing && !drag && !host.contains(e.target)) { if (hover || mark) { hover = null; mark = null; requestUpdate(); } return; }
+      shift = e.shiftKey; ctrl = e.ctrlKey || e.metaKey; move(local(e));
     });
     document.addEventListener('mouseup', function(e){
       if (e.button !== 0) return;
-      var p = local(e); shift = e.shiftKey;
+      var p = local(e); shift = e.shiftKey; ctrl = e.ctrlKey || e.metaKey;
       if (placing) {
         placing.down = false;
         if (placing.dragged) { move(p); finish(); }             // press, drag, release: done
         return;                                                  // a click: the second click places the other end
       }
       if (drag) {
-        var dr = drag; drag = null; host.style.cursor = '';
+        var dr = drag; drag = null; mark = null; host.style.cursor = '';
         if (dr.moved) { pushUndo(dr.before); changed(); } else { redrawAll(); settle(); }
       }
     });
@@ -538,7 +660,7 @@
       var p = local(e); if (tool === 'cursor' && inPane(p) && hitAt(p.x, p.y)) take(e);
     }, true);
     function finish(){
-      var d = placing.d; placing = null;
+      var d = placing.d; placing = null; mark = null;
       var a = toPx(d.points[0]), b = toPx(d.points[1]);
       if (!a || !b || (Math.abs(a.x - b.x) < 1 && Math.abs(a.y - b.y) < 1)) { redrawAll(); settle(); return; }   // nothing drawn
       remember(); items.push(d);
@@ -550,27 +672,33 @@
     // ------------------------------------------------------------ keyboard
     document.addEventListener('keydown', function(e){
       if (e.key === 'Shift' && !shift) { shift = true; if (lastMove && (placing || drag)) move(lastMove); }
+      if ((e.key === 'Control' || e.key === 'Meta') && !ctrl) { ctrl = true; if (lastMove && (placing || drag || tool !== 'cursor')) move(lastMove); }   // the magnet flips at once
       if (UI.busy(e) || $('picker').classList.contains('show')) return;
-      var ctrl = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+      var mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
       if (e.key === 'Escape') {                                  // cancel what is being drawn, back to the cursor, nothing selected
-        placing = null;
+        placing = null; mark = null;
         if (tool !== 'cursor') setTool('cursor');
         selected = null; redrawAll(); settle();
       }
       else if ((e.key === 'Delete' || e.key === 'Backspace') && selected && !drag && !selected.locked && !ui.lock) { e.preventDefault(); remove(selected); }
-      else if (e.altKey && ctrl && e.code === 'KeyH') { e.preventDefault(); toggleHide(); }
-      else if (e.altKey && !ctrl && e.code === 'KeyT') { e.preventDefault(); setTool('trendline'); }
-      else if (ctrl && k === 'z' && !e.shiftKey) { e.preventDefault(); doUndo(); }
-      else if (ctrl && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); doRedo(); }
+      else if (e.altKey && mod && e.code === 'KeyH') { e.preventDefault(); toggleHide(); }
+      else if (e.altKey && !mod && e.code === 'KeyT') { e.preventDefault(); setTool('trendline'); }
+      else if (e.altKey && !mod && e.shiftKey && e.code === 'KeyR') { e.preventDefault(); setTool('rectangle'); }
+      else if (mod && k === 'z' && !e.shiftKey) { e.preventDefault(); doUndo(); }
+      else if (mod && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); doRedo(); }
     });
-    document.addEventListener('keyup', function(e){ if (e.key === 'Shift') { shift = false; if (lastMove && (placing || drag)) move(lastMove); } });
-    addEventListener('blur', function(){ shift = false; });
+    document.addEventListener('keyup', function(e){
+      if (e.key === 'Shift') { shift = false; if (lastMove && (placing || drag)) move(lastMove); }
+      if (e.key === 'Control' || e.key === 'Meta') { ctrl = false; if (lastMove && (placing || drag || tool !== 'cursor')) move(lastMove); }
+    });
+    addEventListener('blur', function(){ shift = false; ctrl = false; });
 
     return {
       setMarket: setMarket,
       refresh: function(){ requestUpdate(); if (selected) toolbar(); },
       flush: flush,
       _state: function(){ return {tool:tool, items:items, selected:selected && selected.id, undo:undo.length, redo:redo.length, placing:!!placing,
+                                  magnet: !!ui.magnet, mark: mark, hover: hover && hover.id,
                                   loaded: !!(mk && mk.loaded), rev: mk && mk.rev, failed: mk && mk.failed, left: left.length}; },   // tests, console
       _px: function(i){ return items[i] ? items[i].points.map(toPx) : null; }
     };
