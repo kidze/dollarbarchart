@@ -68,10 +68,12 @@ amount of market activity. TradingView does not draw them, so this does.
     multiple of the line on the day that multiple was lowest or highest.
   * **Power law BlockchainCenter** (violet): the fit shown on blockchaincenter.net/bitcoin-power-law on
     2026-11-20, `log10(price) = -15.5134 + 5.4066 × log10(days)`. The site refits its line every day; this
-    is that day's fit, kept fixed. With it comes the site's corridor: support (0.37× the line) and top
-    (3.51×, dashed), the 5th and 95th percentile of the price's distance from the line.
+    is that day's fit, kept fixed. With it come the site's corridor, support (0.37× the line) and top
+    (3.51×, dashed), the 5th and 95th percentile of the price's distance from the line, and the line's
+    multiples at the same five cycle lows, worked out the same way (0.35× Aug 2015, 0.57× Feb 2019,
+    0.48× Mar 2020, 0.48× Nov 2022, 0.51× Jun 2026).
 
-  Auto scale makes room for the lines and their lows, not for the tops.
+  Auto scale follows the candles only: no line and no multiple makes the price axis wider.
 * **Chart settings** (gear in the top bar): candle body, borders and wick on/off with up and down colors, and
   a solid or gradient background, all with opacity, in a TradingView-style color picker (its palette, your
   own custom colors, an opacity slider). Changes preview live; Cancel puts the chart back.
