@@ -93,6 +93,15 @@
       return [{x:a.x, y:a.y, hx:0, hy:0}, {x:b.x, y:b.y, hx:1, hy:1}, {x:a.x, y:b.y, hx:0, hy:1}, {x:b.x, y:a.y, hx:1, hy:0},
               {x:a.x, y:my, hx:0, hy:null}, {x:b.x, y:my, hx:1, hy:null}, {x:mx, y:a.y, hx:null, hy:0}, {x:mx, y:b.y, hx:null, hy:1}];
     }
+    // The mouse cursor over a rectangle's grip g: arrows the way it moves. A side's middle goes up-down or left-right; a
+    // corner goes along its diagonal, which depends on where it sits on screen (the two ends can be any two opposite corners).
+    function gripCursor(d, g){
+      if (g.hx === null) return 'ns-resize';
+      if (g.hy === null) return 'ew-resize';
+      var a = toPx(d.points[0]), b = toPx(d.points[1]); if (!a || !b) return 'move';
+      var e = [a, b], right = e[g.hx].x >= e[1 - g.hx].x, low = e[g.hy].y >= e[1 - g.hy].y;
+      return right === low ? 'nwse-resize' : 'nesw-resize';      // bottom right and top left share one diagonal
+    }
     function segDist(px, py, a, b){
       var dx = b.x - a.x, dy = b.y - a.y, len = dx*dx + dy*dy, u = len ? ((px - a.x)*dx + (py - a.y)*dy) / len : 0;
       u = Math.max(0, Math.min(1, u)); var x = a.x + u*dx - px, y = a.y + u*dy - py; return Math.sqrt(x*x + y*y);
@@ -272,7 +281,8 @@
       hitTest: function(x, y){                                    // the chart asks this to pick the mouse cursor
         if (tool !== 'cursor' || drag || placing) return null;
         var h = hitAt(x, y); if (!h) return null;
-        return {cursorStyle: 'pointer', externalId: h.d.id, zOrder: 'normal'};
+        var grip = typeof h.part === 'object' && !ui.lock && !h.d.locked;   // a rectangle's grip that can be dragged: resize arrows
+        return {cursorStyle: grip ? gripCursor(h.d, h.part) : 'pointer', externalId: h.d.id, zOrder: 'normal'};
       }
     });
     function redrawAll(){ requestUpdate(); toolbar(); }
@@ -593,6 +603,7 @@
       if (free) {
         drag = {d:h.d, part:h.part, from:p, before:snapshot(), moved:false, l0: ts.coordinateToLogical(p.x),
                 orig: h.d.points.map(function(pt){ var q = toPx(pt); return {l: q.l, y: q.y}; })};
+        if (typeof h.part === 'object') host.style.cursor = gripCursor(h.d, h.part);   // the arrows stay for the whole drag (the chart stops asking hitTest)
       }
       redrawAll();
     }, true);
@@ -606,8 +617,8 @@
       }
       if (drag) {
         if (!drag.moved && Math.hypot(p.x - drag.from.x, p.y - drag.from.y) <= DRAG_MIN) return;
-        if (!drag.moved) { drag.moved = true; host.style.cursor = 'grabbing'; }
         var d = drag.d;
+        if (!drag.moved) { drag.moved = true; if (typeof drag.part !== 'object') host.style.cursor = 'grabbing'; }
         if (drag.part === 'line' || drag.part === 'fill') {      // the whole drawing moves (no magnet: nothing of it is being placed)
           var l1 = ts.coordinateToLogical(p.x); if (l1 === null || drag.l0 === null) return;
           var dl = Math.round(l1 - drag.l0), dy = p.y - drag.from.y;
@@ -622,6 +633,7 @@
           if (g.hx !== null) np[g.hx].t = a3.t;
           if (g.hy !== null) np[g.hy].p = a3.p;
           d.points = np;
+          host.style.cursor = gripCursor(d, g);                  // a corner dragged past its opposite one: the diagonal turns
         } else {
           var a2 = anchorAt(p.x, p.y, shift); if (!a2) return;
           d.points[drag.part] = horizontal(a2, d.points[1 - drag.part]);

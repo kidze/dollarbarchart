@@ -151,7 +151,9 @@
     chart = LC.createChart($('chart'), {
       layout:{background:{type:'solid',color:'#0b0c0e'},textColor:'#a8adb8',fontSize:Math.round(rem * 12 / 14)},
       grid:{vertLines:{color:'#16181d'},horzLines:{color:'#16181d'}},
-      crosshair:{mode:0}, rightPriceScale:{borderColor:'#23262d', mode: logScale ? 1 : 0},
+      crosshair:{mode:0},
+      rightPriceScale:{borderColor:'#23262d', mode: logScale ? 1 : 0,
+        scaleMargins:{top:0.1, bottom:0.1}},   // auto scale leaves a tenth of the height free above the candles and a tenth below (the chart's own default is 20% above, 10% below)
       timeScale:{borderColor:'#23262d',timeVisible:true,secondsVisible:false,rightOffset:6,barSpacing:8,minBarSpacing:2,
         enableConflation:true},   // bars thinner than a pixel are drawn merged: a fully zoomed-out 57k-bar chart repaints in ~3 ms instead of ~34
       localization:{priceFormatter:fmtP}
