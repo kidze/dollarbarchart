@@ -20,6 +20,9 @@
    The multiples (levels) are faint lines that run parallel to their line on a log scale, lows solid and tops dashed. They
    are not named on the chart (that made the price axis a wall of words); the menu item's tooltip says what they are.
 
+   Auto scale follows the candles only, as with TradingView's "scale price chart only": no line and no multiple ever makes
+   the price axis wider. Zoomed in on a stretch where the price is far from a line, the line is simply off screen.
+
    They show on Bitcoin charts only; on any other chart the switches are remembered and nothing is drawn.
    Exposes window.DBCIndicators(app). */
 (function(){
@@ -79,7 +82,6 @@
 
     // ------------------------------------------------------------ one indicator: its line, and its multiples
     function one(def, on){
-      var lows = def.levels.filter(function(b){ return !b.top; });
       // vals: the line's value at every bar on the chart
       var me = {def: def, on: on, line: null, vals: [], lastT: 0};
 
@@ -136,18 +138,7 @@
       }
       var renderer = {draw: paint};
       var paneViews = [{zOrder: function(){ return 'normal'; }, renderer: function(){ return renderer; }}];
-      var primitive = {
-        updateAllViews: function(){},
-        paneViews: function(){ return paneViews; },
-        // Auto scale makes room for the lows where they leave the chart on the right, next to the line itself (in a bear
-        // market they sit just under the price). Not for all of their length: further left they are lower and would only
-        // add empty space. The tops do not count at all: up to 16 times higher, they would squeeze the candles flat.
-        autoscaleInfo: function(from, to){
-          var i0 = Math.max(0, Math.ceil(from)), i1 = Math.min(me.vals.length - 1, Math.floor(to));
-          return i1 < i0 || !lows.length ? null
-            : {priceRange: {minValue: me.vals[i1] * lows[0].k, maxValue: me.vals[i1] * lows[lows.length-1].k}};
-        }
-      };
+      var primitive = {updateAllViews: function(){}, paneViews: function(){ return paneViews; }};
 
       me.value = function(t){ return value(def, t); };
       me.reset = function(){ if (me.line) me.line.setData([]); me.vals = []; me.lastT = 0; };
@@ -155,7 +146,8 @@
         if (!me.on || !applies() || !rows.length) { me.drop(); return; }
         if (!me.line) {
           me.line = app.chart.addSeries(LC.LineSeries, {color: def.color, lineWidth: 2, priceLineVisible: false,
-            lastValueVisible: true, crosshairMarkerVisible: false});
+            lastValueVisible: true, crosshairMarkerVisible: false,
+            autoscaleInfoProvider: function(){ return null; }});   // not counted by auto scale (nor are its multiples): the candles alone set the price range
           me.line.attachPrimitive(primitive);
         }
         var pts = rows.map(point);
