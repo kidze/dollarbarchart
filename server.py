@@ -57,7 +57,9 @@ HERE = Path(__file__).resolve().parent
 PORT = int(os.environ.get("DOLLARBARS_PORT", "8793"))         # a dev checkout runs on another port next to the live app
 POLL_S = 5
 IDLE_EXIT_S = 120
-WINDOW_TITLE = "dollar bars"                                     # the page's title ends with it ("BTC dollar bars")
+# The page's title ends with the app's name ("BTC · kidze chart"). "dollar bars" was its title before the app had a
+# name: a window still showing that older page counts too, until it reloads.
+WINDOW_TITLES = ("kidze chart", "dollar bars")
 BROWSERS = ("msedge.exe", "chrome.exe")                          # the browsers launch.cmd opens the page in
 LOOK_S = 60                                                      # a market counts as "on screen" this long after its last request
 KEEP_LOADED = 3
@@ -1089,7 +1091,7 @@ def live_loop() -> None:
 
 def window_open() -> bool:
     """Is a chart window on the screen (Windows)? A visible top-level window of Edge or Chrome whose title holds
-    the page's ("BTC dollar bars", "... - Microsoft Edge" when it is a tab). Minimized counts; a hidden window
+    the page's ("BTC · kidze chart", "... - Microsoft Edge" when it is a tab). Minimized counts; a hidden window
     does not (Edge keeps hidden windows of closed ones). Edge slows a hidden window's requests to one a minute
     and stops a sleeping one's altogether, so the requests alone cannot tell an idle window from a closed one."""
     if sys.platform != "win32":
@@ -1123,7 +1125,7 @@ def window_open() -> bool:
             if n:
                 title = ctypes.create_unicode_buffer(n + 1)
                 u.GetWindowTextW(h, title, n + 1)
-                if WINDOW_TITLE in title.value and browser(h):
+                if any(t in title.value for t in WINDOW_TITLES) and browser(h):
                     found.append(title.value)
                     return False                                 # (stop: one is enough)
             return True

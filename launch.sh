@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# BTC dollar-bar chart, macOS / Linux launcher. Same job as launch.cmd: start the server if it is not running,
+# kidze chart, macOS / Linux launcher. Same job as launch.cmd: start the server if it is not running,
 # wait for it, open the page. The server quits by itself two minutes after the last page closes.
 cd "$(dirname "$0")" || exit 1
 PY="${DOLLARBARS_PY:-python3}"

@@ -1,4 +1,4 @@
-# dollarbarchart
+# kidze chart
 
 A live **dollar-bar** chart for any coin, combined across the big exchanges, running on your own machine from
 free data. Dollar bars
@@ -7,7 +7,7 @@ Learning* (ch. 2): instead of closing a candle every N minutes, a bar closes eve
 traded**. Busy periods produce many bars, quiet weekends produce few, and every bar carries the same
 amount of market activity. TradingView does not draw them, so this does.
 
-![BTC dollar bars](docs/screenshot.png)
+![kidze chart: BTC dollar bars](docs/screenshot.png)
 
 * **Combined across exchanges (the default).** A ticker's chart is every exchange that lists it, spot and
   perpetual: Binance, Bybit, OKX, Coinbase, Bitstamp, Kraken, KuCoin, Bitfinex. Dollars are summed; each minute's open,
@@ -78,7 +78,7 @@ amount of market activity. TradingView does not draw them, so this does.
 * **Nothing runs while the window is closed.** Downloads happen only while the app is open; two minutes
   after the window is closed the server writes what it has to disk and exits. The next launch resumes. A
   window left open but hidden, minimized or asleep (Edge slows or stops its requests) keeps the server: it
-  looks for a visible Edge or Chrome window titled "… dollar bars" before it stops.
+  looks for a visible Edge or Chrome window titled "… kidze chart" before it stops.
 * A **watchlist** (☆ next to the ticker) is downloaded in the background while the app is open, so those
   tickers open instantly later. Everything else is fetched the first time you pick it, all exchanges at once,
   and the chart grows while the download runs (a few minutes for a young coin; hours for the full BTC history
