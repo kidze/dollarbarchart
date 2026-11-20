@@ -68,6 +68,7 @@ main{flex:1;min-height:0;display:flex}
 #lgBar.up span{color:var(--up)}
 #lgBar.dn span{color:var(--dn)}
 #lgBar span.t{color:var(--tx2)}
+#lgInd{display:flex;flex-wrap:wrap;column-gap:1.1rem}            /* one entry per indicator switched on, side by side; a narrow window wraps them */
 #lgInd:empty{display:none}
 #lgInd i{display:inline-block;width:.9rem;height:2px;border-radius:1px;vertical-align:middle;margin-right:.5rem}   /* the indicator's line, in its color */
 #axis{position:absolute;z-index:6;right:.43rem;bottom:.36rem;display:flex;gap:.2rem}
