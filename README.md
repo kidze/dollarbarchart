@@ -57,16 +57,21 @@ amount of market activity. TradingView does not draw them, so this does.
   and anchored by time and price, so they show on every bar size and time frame. Two app windows open at once
   show each other's changes and never overwrite each other; if a save fails (server restarting) the top bar
   says so in red and it is retried until it works.
-* **Indicators** (button in the top bar): lines computed from the bars, switched on or off from its menu and
-  remembered. For now one, on Bitcoin charts: the power law exactly as posted on Bitcointalk in February 2013
-  and never refitted, `price = 4.41877e-17 × (days since 2009-01-03) ^ 5.59807`. It depends on the date alone,
-  so it is the same curve on dollar bars and time bars; each bar gets the value at the moment it closed. With
-  it come thinner lines at its multiples where every past cycle bottomed (0.54× Aug 2015, 0.82× Feb 2019,
-  0.68× Mar 2020, 0.65× Nov 2022, 0.66× Jun 2026) and topped (15.7× Nov 2013, 9.4× Dec 2017, 5.2× Mar 2021,
-  2.0× Dec 2024; dashed): the daily close as a multiple of the line on the day that multiple was lowest or
-  highest. Each is named on the price axis with its level where it leaves the chart. The legend shows the
-  line's value, the bar's close as a multiple of it, and the two levels that multiple sits between. Auto
-  scale makes room for the line and the lows, not for the tops.
+* **Indicators** (button in the top bar): lines computed from the bars, each switched on or off from the menu
+  and remembered. Two so far, both Bitcoin power laws, `price = a × (days since 2009-01-03) ^ n`, on Bitcoin
+  charts only. A line depends on the date alone, so it is the same curve on dollar bars and time bars; each
+  bar gets the value at the moment it closed. The legend shows each line's value at the bar under the mouse.
+  * **Power law 2013** (gold): exactly as posted on Bitcointalk in February 2013 and never refitted,
+    `price = 4.41877e-17 × days ^ 5.59807`. With it come thinner lines at its multiples where every past
+    cycle bottomed (0.54× Aug 2015, 0.82× Feb 2019, 0.68× Mar 2020, 0.65× Nov 2022, 0.66× Jun 2026) and
+    topped (15.7× Nov 2013, 9.4× Dec 2017, 5.2× Mar 2021, 2.0× Dec 2024; dashed): the daily close as a
+    multiple of the line on the day that multiple was lowest or highest.
+  * **Power law BlockchainCenter** (violet): the fit shown on blockchaincenter.net/bitcoin-power-law on
+    2026-11-20, `log10(price) = -15.5134 + 5.4066 × log10(days)`. The site refits its line every day; this
+    is that day's fit, kept fixed. With it comes the site's corridor: support (0.37× the line) and top
+    (3.51×, dashed), the 5th and 95th percentile of the price's distance from the line.
+
+  Auto scale makes room for the lines and their lows, not for the tops.
 * **Chart settings** (gear in the top bar): candle body, borders and wick on/off with up and down colors, and
   a solid or gradient background, all with opacity, in a TradingView-style color picker (its palette, your
   own custom colors, an opacity slider). Changes preview live; Cancel puts the chart back.
@@ -125,7 +130,7 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 | `index.html` | the page layout: top bar, drawing toolbar, chart |
 | `static/app.js` | loading and live-updating the chart, ticker picker, watchlist, stats, legend, update banner |
 | `static/draw.js` | the drawing tools (trend line), their toolbars and settings, undo/redo, saving |
-| `static/indicators.js` | the indicators (Bitcoin power law, 2013 formula), their menu and legend line |
+| `static/indicators.js` | the indicators (two Bitcoin power laws), their menu and legend row |
 | `static/settings.js` | the chart settings dialog (candles, background) |
 | `static/window.js` | the app window's size and place, remembered between launches |
 | `static/ui.js`, `static/app.css` | color picker, menus, dialogs; the page's styles |
