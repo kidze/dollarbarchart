@@ -10,8 +10,8 @@
      a = 4.41877e-17, n = 5.59807. With it come its multiples at the low and the top of every past cycle.
    - "Power law BlockchainCenter": the fit blockchaincenter.net/bitcoin-power-law showed on 2026-11-20,
      log10(price) = -15.5134 + 5.4066 x log10(days). The site refits its line on the whole price history every day; this
-     one is that day's fit, kept fixed. With it comes the site's corridor: its "support" and "top", the 5th and 95th
-     percentile of how far the price has been from the line.
+     one is that day's fit, kept fixed. With it come the site's corridor (its "support" and "top", the 5th and 95th
+     percentile of how far the price has been from the line) and the line's multiples at the low of every past cycle.
 
    A line depends on the date alone, so it is the same curve on dollar bars and on time bars. Every bar gets the value at
    the moment it closed (the forming bar: its newest minute), so a bar's close and the line under it are from the same
@@ -58,9 +58,18 @@
     {id: 'powerLawBC', name: 'Power law BlockchainCenter', a: Math.pow(10, -15.513437681057946), n: 5.406601360409615,
      color: '#CC9FFF', thin: 'rgba(204,159,255,0.42)',
      tip: 'log10(price) = -15.5134 + 5.4066 × log10(days since 2009-01-03): the fit on blockchaincenter.net on 2026-11-20, kept fixed (the site refits it every day). ' +
-          'The faint lines are its corridor: support (solid, 0.37× the line) and top (dashed, 3.51×), the 5th and 95th percentile of the price\'s distance from the line.',
+          'The faint lines are its multiples at past cycle lows (solid: 2015, 2019, 2020, 2022, 2026) and the site\'s corridor: ' +
+          'support (solid, 0.37× the line) and top (dashed, 3.51×), the 5th and 95th percentile of the price\'s distance from the line.',
+     // The cycle lows are worked out like the 2013 line's, for the same five lows: the daily close as a multiple of this
+     // line on the day that multiple was the cycle's lowest (Coin Metrics daily closes to 2026-11-19, worked out on
+     // 2026-11-20). Lowest multiple first, like the list above.
      levels: [
+       {k: 0.347, name: 'Aug 2015 low', tag: '2015 low'},
        {k: Math.pow(10, -0.4313367288453278), name: 'Support (5th percentile)', tag: 'support'},
+       {k: 0.478, name: 'Nov 2022 low', tag: '2022 low'},
+       {k: 0.482, name: 'Mar 2020 low', tag: '2020 low'},
+       {k: 0.509, name: 'Jun 2026 low', tag: '2026 low'},
+       {k: 0.569, name: 'Feb 2019 low', tag: '2019 low'},
        {k: Math.pow(10, 0.545874799165409),   name: 'Top (95th percentile)',    tag: 'top', top: true}
      ]}
   ];
