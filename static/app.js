@@ -238,7 +238,7 @@
     $('tick').title = (info.name ? info.name + ' · ' : '') + 'search a ticker (/)';
     $('star').className = 'tb icon' + (info.watch ? ' on' : ''); $('star').textContent = info.watch ? '★' : '☆';
     $('star').title = info.watch ? 'On the watchlist (kept downloaded): click to remove' : 'Add to the watchlist (kept downloaded while the app is open)';
-    document.title = (info.ticker || market) + ' dollar bars';   // the server looks for "dollar bars" in the window title
+    document.title = (info.ticker || market) + ' · kidze chart';   // the app's name; the server looks for it in the window title (WINDOW_TITLES)
   }
   // The info panel (i): where the data comes from, how much of it there is, and what a bar is.
   function info(){
