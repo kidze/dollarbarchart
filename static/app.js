@@ -15,6 +15,7 @@
   var mode = P.mode || 'dollar', sizes = P.sizes || {}, size = sizes[market] || null, tf = P.tf || '1D', logScale = !!P.log;
   var meta = null, bars = [], forming = null, byTime = {}, loading = false, retryTimer = null, restarting = false, update = null;
   var lastFullLoad = 0, qTimer = null, lastRows = [], seq = 0;
+  var gen = null;                                                  // which build of the server's bars the chart holds (meta.gen)
   var save = function(){ sizes[market] = size; try { localStorage.setItem('dollarbars', JSON.stringify({market:market, mode:mode, sizes:sizes, tf:tf, log:logScale, combined:settled ? 1 : 0})); } catch (e) {} };
   var fmtD = function(x){ return x >= 1e9 ? '$' + (x >= 1e10 ? (x/1e9).toFixed(0) : (x/1e9).toFixed(1)) + 'B' : x >= 1e6 ? '$' + (x >= 1e7 ? (x/1e6).toFixed(0) : (x/1e6).toFixed(1)) + 'M' : x >= 1e4 ? '$' + Math.round(x/1e3) + 'K' : x >= 1e3 ? '$' + (x/1e3).toFixed(1) + 'K' : '$' + Math.round(x); };
   var fmtP = function(p){ if (p < 0) return '-' + fmtP(-p); if (p >= 1000) return p.toLocaleString('en-US',{maximumFractionDigits:0}); if (p >= 1) return p.toFixed(p >= 100 ? 1 : 2); if (!(p > 0)) return String(p); return p.toFixed(Math.min(20, 3 - Math.floor(Math.log10(p)))); };
@@ -210,7 +211,9 @@
   }
 
   function candle(r){ return {time:r.t, open:r.o, high:r.h, low:r.l, close:r.c}; }
-  function put(r){ series.update(candle(r)); ind.update(r); }      // one new or changed bar, to the candles and the indicators
+  // One new or changed bar, to the candles and the indicators. old = it is not the chart's newest bar (the chart
+  // refuses a bar behind its newest one unless told it is a correction of a bar it already has).
+  function put(r, old){ series.update(candle(r), !!old); ind.update(r); }
   function precisionFor(px){ var p = px >= 1000 ? 0 : px >= 10 ? 2 : px >= 0.1 ? 4 : px >= 0.001 ? 6 : px >= 1e-5 ? 8 : px >= 1e-7 ? 10 : 12; series.applyOptions({priceFormat:{type:'price',precision:p,minMove:Math.pow(10,-p)}}); }
   // The status dot (green live, amber busy, red trouble) with a word only when it is not simply live; the details are
   // its tooltip. While history downloads, a hairline under the top bar fills up.
@@ -220,10 +223,11 @@
     var sync = m.sync || '', s = $('status'), bad = sync === 'error' || sync.indexOf('failed') === 0 || sync === 'server not answering';
     s.className = sync === 'live' && !m.live_err ? 'live' : bad ? 'bad' : 'busy';
     var pct = sync === 'backfilling' && m.progress ? Math.floor(m.progress.pct) : null;
-    s.querySelector('span').textContent = sync === 'live' ? (m.live_err ? 'Retrying' : '') : pct !== null ? 'Syncing ' + pct + '%'
+    var merging = pct !== null && m.progress.merging;             // every download is in: the exchanges are being merged into one chart
+    s.querySelector('span').textContent = sync === 'live' ? (m.live_err ? 'Retrying' : '') : merging ? 'Merging' : pct !== null ? 'Syncing ' + pct + '%'
       : sync === 'backfilling' ? 'Syncing' : sync === 'loading' ? 'Loading' : sync === 'queued' ? 'Queued' : sync === 'server not answering' ? 'Offline'
       : sync.indexOf('restart') === 0 ? 'Restarting' : bad ? 'Error' : sync.charAt(0).toUpperCase() + sync.slice(1);
-    var txt = note || (m.live_err && sync.indexOf('failed') !== 0 ? sync + ' (last ' + (sync === 'live' ? 'poll' : 'download attempt') + ' failed: ' + m.live_err + ', retrying)' : sync);
+    var txt = note || (merging ? 'merging the exchanges into one chart' : m.live_err && sync.indexOf('failed') !== 0 ? sync + ' (last ' + (sync === 'live' ? 'poll' : 'download attempt') + ' failed: ' + m.live_err + ', retrying)' : sync);
     s.title = txt + (m.last ? '\nlast candle ' + fmtT(m.last) : '') + (m.updated ? '\nchecked ' + new Date(m.updated*1000).toISOString().slice(11,19) + 'Z' : '') +
       (sync === 'backfilling' && m.venues ? '\n\n' + venueText(m) : sync === 'backfilling' && m.notice ? '\n' + m.notice : '');
     $('prog').className = pct !== null ? 'show' : '';
@@ -304,9 +308,24 @@
       else if (!adaptive(size) && meta.sizes.indexOf(size) < 0) size = nearestSize(meta.sizes, size);    // the medians moved since: the closest size left
       $('bSize').firstChild.textContent = sizeLabel(size);
       var k = j.keys[key()]; if (!k) { scheduleRetry(); return; }
-      bars = k.bars; forming = k.forming; lastFullLoad = Date.now(); save();
+      bars = k.bars; forming = k.forming; gen = meta.gen; lastFullLoad = Date.now(); save();
       render(reset);
-    }).catch(function(){ setStatus({sync:'server not answering'}); scheduleRetry(); }).then(function(){ loading = false; if (mk !== market || moved) load(true); });   // the user moved on meanwhile: load what they want now
+    }, function(){ setStatus({sync:'server not answering'}); scheduleRetry(); })   // (only a server that does not answer is "Offline" ...
+    .catch(function(e){ slip(e); setStatus({sync:'error'}, 'this chart could not be drawn: ' + (e && e.message || e)); scheduleRetry(); })   // ... the page's own slip says so)
+    .then(function(){ loading = false; if (mk !== market || moved) load(true); });   // the user moved on meanwhile: load what they want now
+  }
+  function slip(e){ if (window.console) console.error(e); }
+  // Does what a poll sent carry on from the bars on the chart? The same completed bars, or one more (the forming bar,
+  // closed), and a forming bar that starts where the chart's does. The chart cannot place a bar behind its newest one,
+  // so anything else takes the whole set again: a late minute moved where the last bar closes, or bars went missing.
+  function follows(k){
+    var n = bars.length, last = k.tail[k.tail.length-1], f = k.forming;
+    if (k.n === n + 1) {
+      if (n && k.tail.length > 1 && !sameBar(k.tail[0], bars[n-1])) return false;   // the bar before the new one changed meanwhile
+      return forming ? last.t === forming.t : !n || last.t > bars[n-1].t;
+    }
+    if (k.n !== n || (n && last.t !== bars[n-1].t)) return false;
+    return !forming || (!!f && f.t === forming.t);
   }
   function poll(){
     if (restarting) return;
@@ -317,21 +336,20 @@
       if (kk !== key() || loading) return;                                   // a menu change is in flight: its load() will redraw
       var k = j.keys[kk];
       if (!k) { if (Object.keys(j.keys).length) load(true); return; }         // this size no longer exists (rebuilt after catch-up): reload
-      if (j.meta.sync === 'backfilling') { if (Date.now() - lastFullLoad > 15000) load(false); return; }   // history is growing: refresh the whole set now and then
-      if (k.n > bars.length + 1) return load(false);                          // missed more than one bar (laptop slept?): reload
-      var before = bars.length + (forming ? 1 : 0), formingT = forming && forming.t;
-      if (k.n === bars.length + 1) {
-        if (bars.length && k.tail.length > 1 && !sameBar(k.tail[0], bars[bars.length-1])) return load(false);   // the previous bar was re-cut while we were not looking
-        var b = k.tail[k.tail.length-1]; bars.push(b); byTime[b.t] = b; put(b);
+      if (j.meta.gen !== gen) return load(false);                             // the server built its bars again (a merge after catching up, a new median day): the whole set
+      if (!follows(k)) {                                                      // missed bars (laptop slept?), or the last bar closes elsewhere now: the whole set
+        if (j.meta.sync !== 'backfilling' || Date.now() - lastFullLoad > 15000) load(false);   // (history that is still downloading grows all the time: now and then)
+        return;
       }
-      else if (k.n === bars.length && k.n && !sameBar(k.tail[k.tail.length-1], bars[k.n-1])) {   // last bar re-cut with its fuller final minute
-        var r = k.tail[k.tail.length-1]; bars[k.n-1] = r; byTime[r.t] = r; put(r);
-      }
+      var n = bars.length, before = n + (forming ? 1 : 0), formingT = forming && forming.t, last = k.tail[k.tail.length-1];
+      if (k.n === n + 1) { bars.push(last); byTime[last.t] = last; put(last); }
+      else if (n && !sameBar(last, bars[n-1])) { bars[n-1] = last; byTime[last.t] = last; put(last, !!forming); }   // re-cut with its fuller final minute: corrected in place
       forming = k.forming;
       if (forming) { byTime[forming.t] = forming; put(forming); }
       if (bars.length + (forming ? 1 : 0) !== before || (forming && forming.t) !== formingT) { seq++; draw.refresh(); }
       fitLimit(); legend(); settings.priceLine();
-    }).catch(function(){ if (!restarting) setStatus({sync:'server not answering'}); });
+    }, function(){ if (!restarting) setStatus({sync:'server not answering'}); })   // only a server that does not answer is "Offline"
+    .catch(function(e){ slip(e); if (!loading && Date.now() - lastFullLoad > 30000) load(false); });   // the page's own slip: drawn again from the whole set
   }
 
   // ---------------------------------------------------------------- ticker picker: type, see spot/perp markets grouped by ticker; Enter = deepest

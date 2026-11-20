@@ -140,6 +140,102 @@ def test_the_server_stays_while_a_chart_window_is_open_however_quiet():
     finally:
         S.window_open, S.STATE["last_req"], S.STATE["restarting"] = saved
 
+def test_a_market_merged_before_shows_from_disk_before_any_exchange_is_asked():
+    import server as S
+    d = Path(tempfile.mkdtemp(prefix="dbc-comb-"))
+    saved = (X.DATA, V.DATA, V.time, S.plan_all, S.price_check, dict(V.VENUES), S.STATE["index"], S.rebuild_all)
+    end = (int(time.time() * 1000) // M - 1) * M
+    CLOCK[0] = end / 1000 + 30
+    a, b = Fake("ax", end - 499 * M), Fake("bx", end - 299 * M)
+    X.DATA = V.DATA = d
+    V.time = types.SimpleNamespace(time=lambda: CLOCK[0], sleep=time.sleep)
+    V.VENUES.update(ax=a, bx=b)
+    S.STATE["index"] = S.STATE["index"] or []
+    asked = []                                                       # which market lists a plan read: fresh ones (a request) or the ones on disk
+
+    def plan(ticker, lists_max_age_s=None):
+        asked.append(lists_max_age_s)
+        out = [{"venue": v.name, "symbol": "T", "kind": "spot", "list_ms": 0} for v in (a, b)]
+        for s in out:
+            s.update(label=V.VENUES[s["venue"]].label("T", "spot"), exact=True, status="queued", pct=None, n=0, first=None, note="")
+        return out, []
+    gate, checked = threading.Event(), []
+
+    def price_check(m, series=None):                                 # the first question to the exchanges: held up, as on a bad network
+        checked.append(([s["label"] for s in series or []], m.cd is not None and m.cd.n, m.sync))
+        gate.wait(10)
+    merges = []
+
+    def rebuild(m):
+        merges.append(dict(m.progress or {}))
+        saved[-1](m)
+    S.plan_all, S.price_check, S.rebuild_all = plan, price_check, rebuild
+    key = "all:TESTDISK"
+    try:
+        m = S.STATE["markets"][key] = S.Market(key)
+        gate.set()
+        S.sync_all(m, ("market", key))                               # first launch: nothing on disk, everything downloaded and merged
+        assert m.sync == "live" and m.cd.n == 500 and asked == [None], (m.sync, asked)
+        assert checked[0][1:] == (False, "loading")                  # (nothing to show before the exchanges answered)
+        assert merges[-1].get("merging") and not any(p.get("merging") for p in merges[:-1]), merges   # only the last merge says "merging"
+        first_gen = m.gen
+        assert first_gen and S.meta_of(m)["gen"] == first_gen
+
+        CLOCK[0] += 20 * 60                                          # the app is closed, 20 minutes pass, it is opened again
+        m = S.STATE["markets"][key] = S.Market(key)
+        gate.clear(); del asked[:], checked[:], merges[:]
+        th = threading.Thread(target=S.sync_all, args=(m, ("market", key)), daemon=True)
+        th.start()
+        t0 = time.time()
+        while not checked and time.time() - t0 < 10:
+            m.last_req = time.time()
+            time.sleep(0.01)
+        assert checked, "the price check was never reached"
+        labels, shown, sync = checked[0]
+        assert shown == 500 and sync == "loading", (shown, sync)     # the chart was built from the files before any exchange was asked
+        assert asked[0] == float("inf") and asked[1] is None, asked  # ... from the market lists on disk; fresh ones only after it
+        assert sorted(labels) == ["ax T", "bx T"]                    # and the series it showed are price-checked like new ones
+        assert m.gen > first_gen and not any("unchecked" in s for s in m.venues)
+        shown_gen = m.gen
+        gate.set()
+        th.join(20)
+        assert not th.is_alive() and m.sync == "live" and m.cd.n == 520, (m.sync, m.cd.n)
+        assert m.gen > shown_gen                                     # the merge after catching up is another build: a page takes the whole set again
+        assert merges[-1].get("merging") and merges[-1].get("pct") == 100.0
+    finally:
+        gate.set()
+        X.DATA, V.DATA, V.time, S.plan_all, S.price_check, venues, S.STATE["index"], S.rebuild_all = saved
+        V.VENUES.clear()
+        V.VENUES.update(venues)
+        S.STATE["markets"].pop(key, None)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_background_downloads_wait_for_the_pages_market_at_start_up():
+    import server as S
+    saved = {k: S.STATE[k] for k in ("markets", "started", "watchlist", "watch_done", "index", "index_stale", "bg_retry_at", "index_retry_at")}
+    scan = S.scan_pending
+    try:
+        S.scan_pending = lambda: []
+        S.STATE.update(markets={}, started=time.time(), watchlist=["AAA"], watch_done=set(), index=[{"ticker": "AAA"}],
+                       index_stale=False, bg_retry_at=0.0, index_retry_at=0.0)
+        assert S.next_job() is None                                  # just started, the page has not asked yet: the worker stays free for it
+        S.STATE["index_stale"] = True
+        assert S.next_job() == ("index", None)                       # (a first launch still fetches the market list at once)
+        S.STATE["index_stale"] = False
+        m = S.Market("all:BBB")
+        S.STATE["markets"]["all:BBB"] = m
+        assert S.next_job() == ("market", "all:BBB")                 # the page's market goes first ...
+        m.sync = "live"
+        assert S.next_job() == ("watch", "AAA")                      # ... and once it is served the watchlist follows, grace or not
+        S.STATE["markets"] = {}
+        S.STATE["started"] = time.time() - S.START_GRACE_S - 1
+        assert S.next_job() == ("watch", "AAA")                      # nobody asked for anything: after the grace the watchlist starts anyway
+    finally:
+        S.STATE.update(saved)
+        S.scan_pending = scan
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
