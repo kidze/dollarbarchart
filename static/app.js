@@ -148,6 +148,86 @@
   var rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 14;     // the page's UI size, see html{font-size}
   var chart, series, scale, settings, draw, ind;
 
+  // ---------------------------------------------------------------- auto scale: an abnormal candle does not set the price range
+  // One wick to a tenth of a cent (a bad fill, a flash crash on one exchange), or the first bar of a history (years of
+  // prices in one candle), would squeeze every other candle into a strip. Auto scale fits the candles on screen without
+  // such a candle's far end: it runs off the pane's edge (its real prices stay in the legend, and dragging the price
+  // axis shows all of it). Measured on the scale in use, so on a log scale in ratios.
+  //   Judged among the bars on screen and, when those are few, their neighbours too (FIT_WIDE bars at least): the
+  //   same candle is abnormal at every zoom, and a tall candle among a dozen on screen is not abnormal for that.
+  //   Always normal: every close where the price stayed for two bars or more (one bar's lone close can be a bad
+  //   print; the newest bar's close is the price now and always counts), and every high and low but the few most
+  //   extreme (FIT_SHARE of the bars, FIT_MOST at most, one at least).
+  //   From there outwards, the next high or low is normal too while it lies no further beyond the range so far than
+  //   FIT_REACH times that range's height (or FIT_BARS typical candles, in a market that hardly moves).
+  //   Abnormal, and cut: what lies beyond the first gap wider than that. So a cut end is always further from the
+  //   candles that are fitted than all of them are tall: fitting it would have given it more than half the pane.
+  var FIT_SHARE = 0.05, FIT_MOST = 50, FIT_FROM = 6, FIT_WIDE = 100, FIT_REACH = 1, FIT_BARS = 8;
+  function med3(a, b, c){ return Math.max(Math.min(a, b), Math.min(Math.max(a, b), c)); }
+  // at(i) = bar i of `total`; i0..i1 = the bars on screen. Returns {lo, hi, cut} (prices; cut = far ends left out),
+  // or null when no candle on screen is abnormal: the chart's own fit, every high and low, then stands as it is.
+  function fitRange(at, i0, i1, total, log){
+    var j0 = i0, j1 = i1, n = i1 - i0 + 1;
+    if (n < FIT_WIDE) {                                                      // few bars on screen: their neighbours count too
+      j0 = Math.max(0, i0 - ((FIT_WIDE - n) >> 1));
+      j1 = Math.min(total - 1, j0 + FIT_WIDE - 1);
+      j0 = Math.max(0, j1 - FIT_WIDE + 1);
+      n = j1 - j0 + 1;
+    }
+    if (n < FIT_FROM) return null;
+    var P = Math.min(FIT_MOST, Math.max(1, Math.floor(n * FIT_SHARE)));
+    var y = log ? Math.log : function(v){ return v; };
+    function shut(i){                                                        // bar i's close, if the price stayed there
+      var c = at(i).c, q;
+      if (i >= total - 1) return c;
+      q = at(i + 1).c;
+      return med3(i > 0 ? at(i - 1).c : q, c, q);
+    }
+    var lows = [], highs = [], lo = Infinity, hi = -Infinity, i, j, r, c;
+    for (i = j0; i <= j1; i++) {
+      r = at(i);
+      if (!(r.h >= r.l) || (log && !(r.l > 0))) return null;                 // (no place on a log scale: the chart's own fit)
+      j = lows.length;                                                       // the P + 1 lowest lows, lowest first
+      if (j <= P || r.l < lows[P]) { if (j > P) j = P; while (j > 0 && r.l < lows[j-1]) { lows[j] = lows[j-1]; j--; } lows[j] = r.l; }
+      j = highs.length;                                                      // the P + 1 highest highs, highest first
+      if (j <= P || r.h > highs[P]) { if (j > P) j = P; while (j > 0 && r.h > highs[j-1]) { highs[j] = highs[j-1]; j--; } highs[j] = r.h; }
+      c = shut(i);
+      if (c < lo) lo = c;
+      if (c > hi) hi = c;
+    }
+    var hts = [], step = Math.max(1, Math.floor(n / 255));                   // a typical candle's height: the median of a sample
+    for (i = j0; i <= j1; i += step) { r = at(i); hts.push(y(r.h) - y(r.l)); }
+    hts.sort(function(a, b){ return a - b; });
+    var least = FIT_BARS * hts[hts.length >> 1], a = P - 1, b = P - 1, reach, more = true;   // a, b: the next low and high outwards
+    lo = Math.min(lo, lows[P]); hi = Math.max(hi, highs[P]);
+    while (more) {
+      reach = FIT_REACH * Math.max(y(hi) - y(lo), least);
+      if (a >= 0 && y(lo) - y(lows[a]) <= reach) lo = Math.min(lo, lows[a--]);
+      else if (b >= 0 && y(highs[b]) - y(hi) <= reach) hi = Math.max(hi, highs[b--]);
+      else more = false;
+    }
+    if (a + b + 2 === 0 || !(hi > lo)) return null;
+    if (j0 === i0 && j1 === i1) return {lo: lo, hi: hi, cut: a + b + 2};
+    var sLo = Infinity, sHi = -Infinity, cut = 0;                            // of the bars on screen: the normal ends, and the closes
+    for (i = i0; i <= i1; i++) {
+      r = at(i); c = shut(i);
+      if (r.l < lo) cut++; else if (r.l < sLo) sLo = r.l;
+      if (r.h > hi) cut++; else if (r.h > sHi) sHi = r.h;
+      if (c < sLo) sLo = c;
+      if (c > sHi) sHi = c;
+    }
+    return cut && sHi > sLo ? {lo: sLo, hi: sHi, cut: cut} : null;
+  }
+  function barAt(i){ return i < bars.length ? bars[i] : forming; }
+  // The candle series' auto scale (the chart asks on every scroll and zoom): its own fit unless a candle is abnormal.
+  function autoFit(original){
+    var res = original(), lr = res && res.priceRange && chart ? chart.timeScale().getVisibleLogicalRange() : null;
+    var total = bars.length + (forming ? 1 : 0);
+    if (!lr || !total) return res;
+    var f = fitRange(barAt, Math.max(0, Math.floor(lr.from)), Math.min(total - 1, Math.ceil(lr.to)), total, logScale);   // (a bar half in view counts, as in the chart's own fit)
+    return f ? {priceRange: {minValue: f.lo, maxValue: f.hi}, margins: res.margins} : res;
+  }
+
   function makeChart(){
     chart = LC.createChart($('chart'), {
       layout:{background:{type:'solid',color:'#0b0c0e'},textColor:'#a8adb8',fontSize:Math.round(rem * 12 / 14)},
@@ -160,7 +240,7 @@
       localization:{priceFormatter:fmtP}
     });
     series = chart.addSeries(LC.CandlestickSeries, {upColor:'#2ebd85',downColor:'#f23645',wickUpColor:'#2ebd85',wickDownColor:'#f23645',borderVisible:false,
-      priceFormat:{type:'price',precision:2,minMove:0.01}});
+      priceFormat:{type:'price',precision:2,minMove:0.01}, autoscaleInfoProvider: autoFit});
     scale = chart.priceScale('right');
     new ResizeObserver(function(){                               // whole pixels that fit: rounding a 861.5 px box up to 862 made the page scroll sideways
       var r = $('chart').getBoundingClientRect(); chart.applyOptions({width: Math.floor(r.width), height: Math.floor(r.height)});
@@ -501,6 +581,7 @@
   app.logicalToTime = logicalToTime;
   app.barCount = function(){ return bars.length + (forming ? 1 : 0); };
   app.rows = rows;
+  app.fitRange = fitRange;
   app.market = function(){ return market; };
   app.marketInfo = function(){ return meta && meta.market; };
   app.fmtP = fmtP; app.fmtT = fmtT; app.fmtHrs = fmtHrs;
