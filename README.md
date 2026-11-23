@@ -78,6 +78,14 @@ amount of market activity. TradingView does not draw them, so this does.
     0.48× Mar 2020, 0.48× Nov 2022, 0.51× Jun 2026).
 
   Auto scale follows the candles only: no line and no multiple makes the price axis wider.
+* **Auto scale leaves an abnormal candle's far end out.** One wick to a tenth of a cent (a bad fill, a flash
+  crash on one exchange), or the first bar of a long history (years of prices in one candle), would squeeze
+  every other candle into a strip. Auto scale fits the candles on screen without that far end: it runs off
+  the edge, the legend still shows the candle's real prices, and dragging the price axis shows all of it.
+  Abnormal means the end sticks out further than all the candles around it (the ones on screen, a hundred at
+  least) are tall together, so it is the same candle at every zoom. Closes where the price stayed for two
+  bars or more, and the price now, are always in view. With no abnormal candle on screen the fit is the
+  chart's own: every high and low, 10% free above and below.
 * **Chart settings** (gear in the top bar): candle body, borders and wick on/off with up and down colors, and
   a solid or gradient background, all with opacity, in a TradingView-style color picker (its palette, your
   own custom colors, an opacity slider). Changes preview live; Cancel puts the chart back.
