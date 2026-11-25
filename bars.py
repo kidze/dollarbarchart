@@ -281,6 +281,13 @@ def sizes_for(auto: float, medians: dict = None) -> list:
     return sorted(s for s in out if s > 0)
 
 
+def menu_of(cd: Candles) -> dict:
+    """The size menu as build_all() puts it in meta: the median day, the other medians and the sizes offered."""
+    auto = auto_size(cd)
+    medians = median_sizes(cd, auto)
+    return {"auto_size": auto, "sizes": sizes_for(auto, medians), "medians": medians}
+
+
 def nearest_size(sizes: list, want: str, auto: float) -> float:
     """The size the page falls back to when the one it remembered is gone (the page's nearestSize does the same):
     the closest left on a log scale, or the median day when it remembered none."""
@@ -301,9 +308,8 @@ def size_key(size: float) -> str:
 
 def build_all(cd: Candles) -> tuple[dict, dict]:
     """All bar sets from scratch. Returns (sets, meta)."""
-    auto = auto_size(cd)
-    medians = median_sizes(cd, auto)
-    sizes = sizes_for(auto, medians)
+    menu = menu_of(cd)
+    auto, medians, sizes = menu["auto_size"], menu["medians"], menu["sizes"]
     sets = {}
     cum = np.cumsum(cd.d[:cd.n])                                 # every dollar set cuts the same running dollars
     day_med = day_medians(cd, int(cd.ts[0] // DAY), int(cd.ts[cd.n - 1] // DAY))
