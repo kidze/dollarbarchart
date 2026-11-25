@@ -236,6 +236,44 @@ def test_background_downloads_wait_for_the_pages_market_at_start_up():
         S.scan_pending = scan
 
 
+def test_the_size_menu_follows_the_median_day_while_the_app_stays_open():
+    import numpy as np
+    import pandas as pd
+    import bars as B
+    import server as S
+    day = 86_400_000
+    start = (int(time.time() * 1000) // day - 50) * day
+
+    def rows(first_ms, days, per_minute):                        # whole days of minutes, each minute $per_minute
+        ts = first_ms + np.arange(days * 1440) * M
+        return [[int(t), 100.0, 101.0, 99.0, 100.0, per_minute / 100, float(per_minute)] for t in ts]
+
+    old = rows(start, 20, 1000.0)                                # 20 days of $1.44M
+    cd = B.Candles(pd.DataFrame(old, columns=["ts", "open", "high", "low", "close", "volume", "turnover"]))
+    m = S.Market("linear:TESTSIZES")
+    m.cd = cd
+    m.sets, m.meta = B.build_all(cd)
+    m.built_n, m.gen, m.sync = cd.n, next(S.GEN), "live"
+    assert m.meta["auto_size"] == 1.4e6 and "d:1400000" in m.sets
+    now = time.time()
+    sets, gen = m.sets, m.gen
+    S.check_sizes(m, now)                                        # the menu has not moved: nothing is built again
+    assert m.sets is sets and m.gen == gen and m.sizes_at == now + S.SIZES_CHECK_S
+
+    cd.upsert(rows(start + 20 * day, 25, 1050.0))                # 25 busier days: the median day is $1.51M now
+    B.update_all(m.sets, cd)
+    S.check_sizes(m, now + 60)                                   # (not before the hour is up)
+    assert m.gen == gen and m.meta["auto_size"] == 1.4e6
+    S.check_sizes(m, now + S.SIZES_CHECK_S)
+    assert m.gen != gen and m.meta["auto_size"] == 1.5e6 and m.meta["medians"]["1D"] == 1.5e6
+    assert "d:1500000" in m.sets and "d:1400000" not in m.sets
+    assert m.meta["sizes"] == sorted(s["size"] for k, s in m.sets.items() if k.startswith("d:"))
+    assert m.built_n == cd.n and m.sets["d:1500000"]["bars"] == B.build_all(cd)[0]["d:1500000"]["bars"]
+    assert B.nearest_size(m.meta["sizes"], "1400000", m.meta["auto_size"]) == 1.5e6   # a page on the old median day: the new one
+    sets, gen = m.sets, m.gen
+    S.check_sizes(m, now + 2 * S.SIZES_CHECK_S)                  # the hour after: the same menu, nothing built again
+    assert m.sets is sets and m.gen == gen
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

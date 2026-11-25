@@ -75,6 +75,7 @@ STALE_PRICE_S = 3600                                             # the price che
 REPLAN_S = 3600                                                  # an exchange's missing market list is asked for again after this
 RESYNC_S = 900                                                   # a combined market with a failed exchange tries it (only it) again after this
 CACHE_REFRESH_DAYS = 7                                           # the merge cache is rewritten once the days merged on top of it reach this
+SIZES_CHECK_S = 3600                                             # a live market's size menu is worked out again this often
 LOAD_THREADS = 4                                                 # a combined market's series files are read this many at a time
 START_GRACE_S = 15                                               # background downloads wait this long after start-up for the page to ask for its market
 POOL = ThreadPoolExecutor(12, thread_name_prefix="live")         # the combined markets' live polls, all exchanges at once
@@ -122,6 +123,7 @@ class Market:
         self.replan = False                                      # all:<T> only: an exchange's market list was missing at plan time: plan again
         self.live_ok = {}                                        # all:<T> only: label -> when its live poll last answered
         self.live_stale = False                                  # all:<T> only: an exchange missed live minutes: re-merge from the files
+        self.sizes_at = 0.0                                      # when a live market's size menu is next worked out again (check_sizes)
 
     @property
     def combined(self) -> bool:
@@ -1130,8 +1132,36 @@ def live_loop() -> None:
                     m.meta["n_candles"] = int(cd.n)
                     m.updated = time.time()
                 m.live_err = err
+                check_sizes(m, now)
             except Exception as e:                               # network blip: keep serving what we have
                 m.live_err = type(e).__name__
+
+
+def check_sizes(m: Market, now: float) -> None:
+    """The size menu follows the medians while the app stays open. It is worked out when the bars are built (at
+    start-up, after a merge), and a window can stay open for weeks: so every SIZES_CHECK_S a live market's menu is
+    worked out again from the candles in memory (0.1 s on all of BTC), and when it moved (the median day went from
+    $26B to $27B) every set is built again (2 s). The page finds its size gone and takes the closest one left, as
+    it does at start-up: a chart on the median day stays on the median day."""
+    if now < m.sizes_at:
+        return
+    m.sizes_at = now + SIZES_CHECK_S
+    with LOCK:
+        cd, gen = m.cd, m.gen
+        if cd is None or not cd.n or m.sets is None:
+            return
+        n = cd.n
+        menu = B.menu_of(cd)
+        if all(m.meta.get(k) == v for k, v in menu.items()):
+            return
+    t0 = time.time()
+    sets, meta = B.build_all(cd)                                 # (outside the lock: while a market is live, only the
+    with LOCK:                                                   # live loop, this thread, adds its candles)
+        if m.cd is not cd or m.gen != gen or cd.n != n:          # built again meanwhile (a merge): its menu is the new one
+            return
+        m.sets, m.meta, m.built_n, m.gen = sets, meta, cd.n, next(GEN)
+        m.updated = time.time()
+    log(f"{m.key}: the size menu moved with the medians (" + ", ".join(f"{k} {v:g}" for k, v in meta["medians"].items()) + f"): bars built again in {time.time() - t0:.1f}s")
 
 
 def window_open() -> bool:
