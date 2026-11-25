@@ -49,11 +49,15 @@ amount of market activity. TradingView does not draw them, so this does.
   `A` auto-scale and `L` log-scale buttons, OHLC + bar duration + dollars on hover, bar statistics in the
   header (count, median / fastest / slowest bar, busiest and quietest month, last 365 days, forming bar).
   Zooming out goes as far as the whole history.
-* **Trend lines and rectangles**, drawn like on TradingView: pick the tool in the left toolbar (`Alt+T` for the
-  line, `Alt+Shift+R` for the rectangle), click two points or press-drag-release; hold `Shift` for a horizontal
-  line or a square. Click a drawing to select it, drag it or its grips (a rectangle has eight: corners and the
-  middle of each side), `Delete` removes it, double-click opens its settings (color with opacity, width, style,
-  extend left/right; a line's middle point, price labels and stats; a rectangle's background), `Ctrl+Z` /
+* **Trend lines, rectangles and Fib retracements**, drawn like on TradingView: pick the tool in the left toolbar
+  (`Alt+T` for the line, `Alt+Shift+R` for the rectangle, `Alt+F` for the Fib retracement), click two points or
+  press-drag-release; hold `Shift` for a horizontal line or a square. Click a drawing to select it, drag it or its
+  grips (a rectangle has eight: corners and the middle of each side), `Delete` removes it, double-click opens its
+  settings (color with opacity, width, style, extend left/right; a line's middle point, price labels and stats; a
+  rectangle's background and middle line). A Fib retracement puts level 0 on the second point and 1 on the
+  first, with TradingView's settings and defaults: its 24 levels (11 on), each with its own ratio and color, the
+  dashed trend line, the background between levels, Reverse, one color for all, prices and levels (values or
+  percents) as labels left, center or right, font size, and levels spaced in ratios on a log scale. `Ctrl+Z` /
   `Ctrl+Y` undo and redo, `Esc` cancels. The **magnet** in the left toolbar snaps a point being placed or
   dragged to the open, high, low or close of the bar under the mouse when the mouse is within 10 pixels of it
   (hold `Ctrl` to flip it for a moment). The left toolbar also
@@ -143,7 +147,7 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 | `userdata.py` | saved drawings (per market) and chart settings, written crash-safe like the candles; only the app's own page may change them |
 | `index.html` | the page layout: top bar, drawing toolbar, chart |
 | `static/app.js` | loading and live-updating the chart, ticker picker, watchlist, stats, legend, update banner |
-| `static/draw.js` | the drawing tools (trend line, rectangle, magnet), their toolbars and settings, undo/redo, saving |
+| `static/draw.js` | the drawing tools (trend line, rectangle, Fib retracement, magnet), their toolbars and settings, undo/redo, saving |
 | `static/indicators.js` | the indicators (two Bitcoin power laws), their menu and legend row |
 | `static/settings.js` | the chart settings dialog (candles, background) |
 | `static/window.js` | the app window's size and place, remembered between launches |
