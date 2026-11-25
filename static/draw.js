@@ -1,12 +1,16 @@
-/* Drawing tools, TradingView style: the trend line and the rectangle.
+/* Drawing tools, TradingView style: the trend line, the rectangle and the Fib retracement.
 
-   Draw: pick the tool (left toolbar, Alt+T for the line, Alt+Shift+R for the rectangle), then click two points, or press,
+   Draw: pick the tool (left toolbar, Alt+T for the line, Alt+Shift+R for the rectangle, Alt+F for the Fib retracement), then click two points, or press,
    drag and release. Holding Shift keeps a line horizontal and makes a rectangle a square (while placing it or dragging an
    end or corner; while moving a whole drawing, Shift keeps the move straight across or straight up and down). Hover a
    drawing to see its grips; click to select it; drag it to move it, or a grip to reshape it (a rectangle has eight: a
    corner moves two sides, a side's middle moves that side); Delete removes it; double-click (or the gear) opens its
    settings; Ctrl+Z / Ctrl+Y undo and redo; Esc cancels. The floating toolbar of the selected drawing changes color (with
    opacity), width and style. A rectangle with a background is picked up anywhere inside it, one without by its border.
+
+   Fib retracement: level 0 sits on the second point and level 1 on the first (drawn from a low to a high, the retracements
+   count down from the high; Reverse swaps the ends), each level a line across the two points' times. TradingView's 24 level
+   slots, colors, background, labels and the rest of its settings, with its defaults.
 
    Magnet (left toolbar): while a point is being placed or a grip dragged, its price snaps to the open, high, low or close
    of the bar under the mouse when the mouse is within MAGNET pixels of it (TradingView's weak magnet); a small ring shows
@@ -24,11 +28,31 @@
   var HIT = 6, HANDLE = 5.5, DRAG_MIN = 4;                       // px: hit distance, handle radius, a press that moves less is a click
   var MAGNET = 10;                                               // px: how near a bar's open, high, low or close the mouse must be to snap
   // The kinds of drawing: each is two points {t, p} and a style. A new one starts from the last style used for its kind.
-  // The rectangle's colors are TradingView's own defaults for it.
+  // The rectangle's colors and middle line, and everything of the Fib retracement, are TradingView's own defaults
+  // (its Charting Library's: linetoolrectangle.*, linetoolfibretracement.*).
+  var FIB_LEVELS = [[0,'#808080',1], [0.236,'#F23645',1], [0.382,'#FF9800',1], [0.5,'#4CAF50',1], [0.618,'#089981',1], [0.786,'#00BCD4',1],
+                    [1,'#808080',1], [1.618,'#2962FF',1], [2.618,'#F23645',1], [3.618,'#9C27B0',1], [4.236,'#E91E63',1],
+                    [1.272,'#FF9800',0], [1.414,'#F23645',0], [2.272,'#FF9800',0], [2.414,'#4CAF50',0], [2,'#089981',0], [3,'#00BCD4',0],
+                    [3.272,'#808080',0], [3.414,'#2962FF',0], [4,'#F23645',0], [4.272,'#9C27B0',0], [4.414,'#E91E63',0], [4.618,'#FF9800',0], [4.764,'#089981',0]];
   var TYPES = {
     trendline: {name: 'Trend line', base: {color:'rgba(41,98,255,1)', width:2, dash:0, extL:false, extR:false, mid:false, labels:false, stats:false}},
-    rectangle: {name: 'Rectangle',  base: {color:'rgba(156,39,176,1)', width:1, dash:0, fill:true, bg:'rgba(156,39,176,0.2)', extL:false, extR:false}}
+    rectangle: {name: 'Rectangle',  base: {color:'rgba(156,39,176,1)', width:1, dash:0, fill:true, bg:'rgba(156,39,176,0.2)', extL:false, extR:false,
+                                           midLine:false, midColor:'rgba(156,39,176,1)', midWidth:1, midDash:1}},
+    fib: {name: 'Fib retracement', base: {color:'rgba(128,128,128,1)', width:2, dash:1, trend:true,   // the trend line between the two points
+                                          lw:2, ld:0, extL:false, extR:false, reverse:false,           // the levels' lines
+                                          levels: FIB_LEVELS.map(function(v){ return {k:v[0], c:UI.norm(v[1]), on:!!v[2]}; }),
+                                          one:false, oneColor:'rgba(128,128,128,1)', fill:true, alpha:0.2,   // background: 80% transparent
+                                          prices:true, coeffs:true, pct:false, hpos:'left', vpos:'middle', font:12, log:false}}
   };
+  function clone(o){ return JSON.parse(JSON.stringify(o)); }
+  // A whole style of this kind: its base, then what was kept (a kept list of levels that is not 24 good ones: the base's).
+  function styleOf(type, kept){
+    var s = Object.assign(clone(TYPES[type].base), kept ? clone(kept) : {});
+    if (type === 'fib' && !(Array.isArray(s.levels) && s.levels.length === FIB_LEVELS.length &&
+                            s.levels.every(function(v){ return v && isFinite(v.k) && typeof v.c === 'string'; })))
+      s.levels = clone(TYPES.fib.base.levels);
+    return s;
+  }
   var DASHES = [[], [7, 5], [2, 3]];                             // solid, dashed, dotted (scaled by width)
   var $ = UI.$;
 
@@ -36,7 +60,7 @@
     var chart = app.chart, series = app.series, ts = chart.timeScale(), store = app.store, host = $('chart');
     var ui = Object.assign({stay:false, lock:false, hide:false, magnet:false, dtb:null}, store.get('drawUi') || {});
     var defaults = {};
-    Object.keys(TYPES).forEach(function(k){ defaults[k] = Object.assign({}, TYPES[k].base, (store.get('drawDefaults') || {})[k] || {}); });
+    Object.keys(TYPES).forEach(function(k){ defaults[k] = styleOf(k, (store.get('drawDefaults') || {})[k]); });
     var items = [];
     var tool = 'cursor', selected = null, hover = null, placing = null, drag = null, shift = false, ctrl = false, lastMove = null;
     var mark = null;                                             // the point the magnet caught, shown as a ring while placing or reshaping
@@ -102,6 +126,23 @@
       var e = [a, b], right = e[g.hx].x >= e[1 - g.hx].x, low = e[g.hy].y >= e[1 - g.hy].y;
       return right === low ? 'nwse-resize' : 'nesw-resize';      // bottom right and top left share one diagonal
     }
+    // A Fib retracement's levels: level k's price, 0 on the second point and 1 on the first (Reverse swaps them); with
+    // "Fib levels based on log scale" on a log chart they are spaced in ratios. On screen: each level's y, and the span
+    // of the lines (the two points' times, extended to the pane's edges on extended sides).
+    function logChart(){ return chart.priceScale('right').options().mode === 1; }
+    function fibLevels(d){
+      var s = d.style, p1 = d.points[0].p, p2 = d.points[1].p, from = s.reverse ? p1 : p2, to = s.reverse ? p2 : p1;
+      var lg = s.log && logChart() && from > 0 && to > 0;
+      return s.levels.filter(function(v){ return v.on && isFinite(v.k); }).map(function(v){
+        var k = +v.k;
+        return {k: k, c: s.one ? s.oneColor : v.c, p: lg ? Math.exp(Math.log(from) + (Math.log(to) - Math.log(from)) * k) : from + (to - from) * k};
+      }).sort(function(x, y){ return x.k - y.k; });
+    }
+    function fibGeo(d, a, b, w){
+      var s = d.style, x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), lv = [];
+      fibLevels(d).forEach(function(v){ var y = series.priceToCoordinate(v.p); if (y !== null && isFinite(y)) { v.y = y; lv.push(v); } });
+      return {x0: s.extL ? Math.min(0, x0) : x0, x1: s.extR ? Math.max(w, x1) : x1, lv: lv};
+    }
     function segDist(px, py, a, b){
       var dx = b.x - a.x, dy = b.y - a.y, len = dx*dx + dy*dy, u = len ? ((px - a.x)*dx + (py - a.y)*dy) / len : 0;
       u = Math.max(0, Math.min(1, u)); var x = a.x + u*dx - px, y = a.y + u*dy - py; return Math.sqrt(x*x + y*y);
@@ -135,7 +176,19 @@
           var r = box(a, b, d.style, w);
           if (x < r.x0 - HIT || x > r.x1 + HIT || y < r.y0 - HIT || y > r.y1 + HIT) continue;
           if (Math.abs(x - r.x0) <= HIT || Math.abs(x - r.x1) <= HIT || Math.abs(y - r.y0) <= HIT || Math.abs(y - r.y1) <= HIT) return {d:d, part:'line'};
+          if (d.style.midLine && Math.abs(y - (r.y0 + r.y1) / 2) <= HIT) return {d:d, part:'line'};
           if (d.style.fill && !inside) inside = {d:d, part:'fill'};
+          continue;
+        }
+        if (d.type === 'fib') {                                  // its ends, any level line, the trend line; inside its background
+          if (d === selected || d === hover) {
+            if (Math.hypot(x - a.x, y - a.y) <= HANDLE + 3) return {d:d, part:0};
+            if (Math.hypot(x - b.x, y - b.y) <= HANDLE + 3) return {d:d, part:1};
+          }
+          var f = fibGeo(d, a, b, w), ys = f.lv.map(function(v){ return v.y; });
+          if (x >= f.x0 - HIT && x <= f.x1 + HIT && ys.some(function(v){ return Math.abs(y - v) <= HIT; })) return {d:d, part:'line'};
+          if (d.style.trend && segDist(x, y, a, b) <= HIT) return {d:d, part:'line'};
+          if (d.style.fill && !inside && ys.length > 1 && x >= f.x0 && x <= f.x1 && y >= Math.min.apply(null, ys) && y <= Math.max.apply(null, ys)) inside = {d:d, part:'fill'};
           continue;
         }
         if (d === selected || d === hover) {
@@ -172,8 +225,9 @@
         var a = toPx(d.points[0]), b = toPx(d.points[1]); if (!a || !b) return;
         var c = UI.parse(d.style.color) || {r:41,g:98,b:255,a:1};
         out.push({d:d, a:a, b:b, solid:'rgb(' + c.r + ',' + c.g + ',' + c.b + ')',
-                  sp: d.type === 'rectangle' ? null : span(a, b, d.style, size.width, size.height),
+                  sp: d.type === 'trendline' ? span(a, b, d.style, size.width, size.height) : null,
                   box: d.type === 'rectangle' ? box(a, b, d.style, size.width) : null,
+                  fib: d.type === 'fib' ? fibGeo(d, a, b, size.width) : null,
                   ink: (c.r*299 + c.g*587 + c.b*114) / 1000 > 150 ? '#111' : '#fff',
                   hot: d === selected || d === hover || (placing && placing.d === d)});
       });
@@ -202,7 +256,53 @@
       if (!s.extL) { ctx.moveTo(X0, Y0); ctx.lineTo(X0, Y1); }
       if (!s.extR) { ctx.moveTo(X1, Y0); ctx.lineTo(X1, Y1); }
       ctx.stroke(); ctx.setLineDash([]);
+      if (s.midLine) {                                           // the middle line: across the box, halfway down
+        var mw = Math.max(1, Math.round(s.midWidth * hr)), YM = Math.round((Y0 + Y1) / 2 - half) + (mw % 2 ? 0.5 : 0);
+        ctx.lineWidth = mw; ctx.strokeStyle = s.midColor; ctx.setLineDash(dashOf(s.midDash, s.midWidth, hr));
+        ctx.beginPath(); ctx.moveTo(X0, YM); ctx.lineTo(X1, YM); ctx.stroke(); ctx.setLineDash([]);
+      }
       if (q.hot) { var fill = handleFill(); grips(q.a, q.b).forEach(function(g){ grip(ctx, hr, vr, g, fill, q.solid, g.hx === null || g.hy === null); }); }
+    }
+    function dashOf(dash, width, hr){ return DASHES[dash].map(function(v){ return v * Math.max(1, width * 0.75) * hr; }); }
+    // A Fib retracement: the background between levels (each band in the color of its level further from 0, at the
+    // background's opacity), the level lines, the dashed trend line between the two points, the grips.
+    function paintFib(ctx, hr, vr, q){
+      var s = q.d.style, f = q.fib, lv = f.lv, lim = 1e5, j;
+      var X0 = Math.round(Math.max(-lim, Math.min(lim, f.x0 * hr))), X1 = Math.round(Math.max(-lim, Math.min(lim, f.x1 * hr)));
+      var lw = Math.max(1, Math.round(s.lw * hr)), half = lw % 2 ? 0.5 : 0;
+      var Y = lv.map(function(v){ return Math.round(Math.max(-lim, Math.min(lim, v.y * vr))) + half; });
+      if (s.fill) for (j = 1; j < lv.length; j++) {
+        var c = UI.parse(lv[j].c) || {r:128, g:128, b:128, a:1};
+        ctx.fillStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + (c.a * s.alpha) + ')';
+        ctx.fillRect(X0, Math.min(Y[j-1], Y[j]), X1 - X0, Math.abs(Y[j] - Y[j-1]));
+      }
+      ctx.lineWidth = lw; ctx.lineCap = 'butt'; ctx.setLineDash(dashOf(s.ld, s.lw, hr));
+      lv.forEach(function(v, i){ ctx.strokeStyle = v.c; ctx.beginPath(); ctx.moveTo(X0, Y[i]); ctx.lineTo(X1, Y[i]); ctx.stroke(); });
+      ctx.setLineDash([]);
+      if (s.trend) {
+        ctx.lineWidth = Math.max(1, Math.round(s.width * hr)); ctx.strokeStyle = s.color; ctx.setLineDash(dashOf(s.dash, s.width, hr));
+        ctx.beginPath(); ctx.moveTo(q.a.x * hr, q.a.y * vr); ctx.lineTo(q.b.x * hr, q.b.y * vr); ctx.stroke(); ctx.setLineDash([]);
+      }
+      if (q.hot) { var fill = handleFill(); [q.a, q.b].forEach(function(p){ grip(ctx, hr, vr, p, fill, q.solid); }); }
+    }
+    // Its labels, in each level's color: "0.618(64,250)" (the ratio, or the percent, and the price), left of the lines by
+    // default, or centered on them or right of them; on, above or under each line.
+    function fibText(s, v){
+      var k = s.pct ? +(v.k * 100).toFixed(2) + '%' : String(+v.k.toFixed(4)), pr = app.fmtP(v.p);
+      return s.coeffs && s.prices ? k + '(' + pr + ')' : s.coeffs ? k : s.prices ? pr : '';
+    }
+    function paintFibLabels(ctx, size, q){
+      var s = q.d.style, f = q.fib;
+      if (!s.coeffs && !s.prices) return;
+      ctx.font = s.font + 'px -apple-system,"Segoe UI",Inter,Roboto,sans-serif';
+      ctx.textBaseline = s.vpos === 'top' ? 'bottom' : s.vpos === 'bottom' ? 'top' : 'middle';
+      f.lv.forEach(function(v){
+        if (v.y < -s.font || v.y > size.height + s.font) return;
+        var t = fibText(s, v), w = ctx.measureText(t).width;
+        var x = s.hpos === 'right' ? f.x1 + 4 : s.hpos === 'center' ? (f.x0 + f.x1 - w) / 2 : f.x0 - 4 - w;
+        ctx.fillStyle = v.c;
+        ctx.fillText(t, Math.max(2, Math.min(size.width - w - 2, x)), s.vpos === 'top' ? v.y - 2 : s.vpos === 'bottom' ? v.y + 2 : v.y);
+      });
     }
     function paintMark(ctx, hr, vr){                             // where the magnet caught: a ring on that open, high, low or close
       var q = mark && !ui.hide ? toPx(mark) : null; if (!q) return;
@@ -212,6 +312,7 @@
     function paintLines(ctx, hr, vr, list){                      // device pixels: crisp at any screen scale
       list.forEach(function(q){
         if (q.box) { paintBox(ctx, hr, vr, q); return; }
+        if (q.fib) { paintFib(ctx, hr, vr, q); return; }
         var s = q.d.style, lw = Math.max(1, Math.round(s.width * hr)), half = lw % 2 ? 0.5 : 0;
         var X1 = q.sp[0].x * hr, Y1 = q.sp[0].y * vr, X2 = q.sp[1].x * hr, Y2 = q.sp[1].y * vr;
         if (Math.abs(Y1 - Y2) < 0.5) Y1 = Y2 = Math.round(Y1) + half;     // horizontal and vertical lines on whole pixels
@@ -229,6 +330,7 @@
       function seen(p){ return p.x >= -1 && p.x <= size.width + 1 && p.y >= -1 && p.y <= size.height + 1; }   // labels follow their end off screen
       list.forEach(function(q){
         var d = q.d, s = d.style, a = q.a, b = q.b;
+        if (q.fib) { paintFibLabels(ctx, size, q); return; }
         if (s.labels) {
           if (seen(a)) label(ctx, size, app.fmtP(d.points[0].p), a.x, a.y, q.solid, q.ink, a.x > b.x, a.y < b.y);
           if (seen(b)) label(ctx, size, app.fmtP(d.points[1].p), b.x, b.y, q.solid, q.ink, b.x > a.x, b.y < a.y);
@@ -343,7 +445,7 @@
 
     function clean(d){                                           // a saved drawing this version can show (others stay on the server untouched)
       if (!d || !TYPES[d.type] || typeof d.id !== 'string' || !Array.isArray(d.points) || d.points.length !== 2) return null;
-      d.style = Object.assign({}, TYPES[d.type].base, d.style || {}); return d;
+      d.style = styleOf(d.type, d.style); return d;
     }
     function editing(){ return placing || drag || document.querySelector('.modal'); }
     function fetchList(m, force){
@@ -405,7 +507,7 @@
     function newId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
     function saveUi(){ store.set('drawUi', ui); }
     function setDefaults(d){                                     // the next new drawing of this kind looks like this one
-      defaults[d.type] = Object.assign({}, d.style);
+      defaults[d.type] = clone(d.style);
       var dd = Object.assign({}, store.get('drawDefaults') || {}); dd[d.type] = defaults[d.type]; store.set('drawDefaults', dd);
     }
 
@@ -467,14 +569,15 @@
     function toolbar(){
       var d = selected;
       if (!d || ui.hide || tool !== 'cursor') { dtb.className = ''; return; }
-      var s = d.style, locked = !!d.locked, rect = d.type === 'rectangle';
+      var s = d.style, locked = !!d.locked, rect = d.type === 'rectangle', fib = d.type === 'fib';
+      var wk = fib ? 'lw' : 'width', dk = fib ? 'ld' : 'dash', lt = fib ? 'Levels line' : 'Line';
       var sw = function(c){ return '<i class="sw chk"><i style="display:block;width:100%;height:100%;border-radius:.15rem;background:' + c + '"></i></i>'; };
       dtb.innerHTML = '<i class="grip" title="Drag to move this toolbar"></i>' +
         (rect ? '<button data-a="color" title="Border color"><i class="sw ring" style="border-color:' + s.color + '"></i></button>' +
                 '<button data-a="bg" title="Background' + (s.fill ? '' : ' (off)') + '">' + sw(s.fill ? s.bg : 'transparent') + '</button>'
-              : '<button data-a="color" title="Line color">' + sw(s.color) + '</button>') +
-        '<button data-a="width" title="Line width">' + lineSvg(Math.min(s.width, 4), 0, 'width:1.6rem') + '<span>' + s.width + 'px</span></button>' +
-        '<button data-a="dash" title="Line style">' + lineSvg(2, s.dash, 'width:1.8rem') + '</button>' +
+              : fib ? '' : '<button data-a="color" title="Line color">' + sw(s.color) + '</button>') +
+        '<button data-a="width" title="' + lt + ' width">' + lineSvg(Math.min(s[wk], 4), 0, 'width:1.6rem') + '<span>' + s[wk] + 'px</span></button>' +
+        '<button data-a="dash" title="' + lt + ' style">' + lineSvg(2, s[dk], 'width:1.8rem') + '</button>' +
         '<button data-a="settings" title="Settings">' + ICON.gear + '</button>' +
         '<button data-a="lock" class="' + (locked ? 'on' : '') + '" title="' + (locked ? 'Unlock' : 'Lock') + '">' + (locked ? ICON.lock : ICON.unlock) + '</button>' +
         '<button data-a="delete" title="Remove (Delete)">' + ICON.trash + '</button>';
@@ -499,8 +602,11 @@
         UI.pickColor(b, {value: d.style[key], custom: colors.get(), onCustom: colors.set,
           onChange: function(v){ if (!touched) { pushUndo(before); touched = true; } d.style[key] = v; if (key === 'bg') d.style.fill = true; setDefaults(d); changed(); }});
       }
-      else if (a === 'width') UI.menu(b, [1,2,3,4].map(function(w){ return {html: lineSvg(w, 0) + w + 'px', on: d.style.width === w, onClick: function(){ restyle({width:w}); }}; }));
-      else if (a === 'dash') UI.menu(b, ['Line','Dashed line','Dotted line'].map(function(n, i){ return {html: lineSvg(2, i) + n, on: d.style.dash === i, onClick: function(){ restyle({dash:i}); }}; }));
+      else if (a === 'width' || a === 'dash') {
+        var k = d.type === 'fib' ? (a === 'width' ? 'lw' : 'ld') : a, set = function(v){ var o = {}; o[k] = v; restyle(o); };
+        if (a === 'width') UI.menu(b, [1,2,3,4].map(function(w){ return {html: lineSvg(w, 0) + w + 'px', on: d.style[k] === w, onClick: function(){ set(w); }}; }));
+        else UI.menu(b, ['Line','Dashed line','Dotted line'].map(function(n, i){ return {html: lineSvg(2, i) + n, on: d.style[k] === i, onClick: function(){ set(i); }}; }));
+      }
       else if (a === 'settings') openSettings(d);
       else if (a === 'lock') { remember(); d.locked = !d.locked; changed(); }
       else if (a === 'delete') remove(d);
@@ -526,19 +632,64 @@
         lab.appendChild(cb); lab.appendChild(document.createTextNode(name)); row.appendChild(lab); body.appendChild(row);
         return row;
       }
+      function row(body, name, ctls){                            // a named row of controls
+        var r = UI.el('div', 'row'), ctl = UI.el('div', 'ctl');
+        if (typeof name === 'string') r.appendChild(UI.el('span', 'name', name)); else r = name;
+        ctls.forEach(function(c){ ctl.appendChild(c); }); r.appendChild(ctl); if (!r.parentNode) body.appendChild(r);
+        return r;
+      }
+      function pick(opts, value, set){                           // a drop-down: opts [[value, text]]
+        var s = UI.el('select', null, opts.map(function(o){ return '<option value="' + o[0] + '">' + o[1] + '</option>'; }).join(''));
+        s.value = String(value); s.onchange = function(){ set(s.value); live(); }; return s;
+      }
+      function lineCtls(ck, wk, dk){                             // a line's color (when it has its own), width and style
+        var out = ck ? [UI.swatch(d.style[ck], function(v){ d.style[ck] = v; live(); }, colors)] : [];
+        out.push(pick([1,2,3,4].map(function(v){ return [v, v + 'px']; }), d.style[wk], function(v){ d.style[wk] = +v; }));
+        out.push(pick([[0,'Solid'], [1,'Dashed'], [2,'Dotted']], d.style[dk], function(v){ d.style[dk] = +v; }));
+        return out;
+      }
+      function inline(name, field){                              // a checkbox inside a row
+        var l = UI.el('label', 'inl'), cb = UI.el('input'); cb.type = 'checkbox'; cb.checked = !!d.style[field];
+        cb.onchange = function(){ d.style[field] = cb.checked; live(); };
+        l.appendChild(cb); l.appendChild(document.createTextNode(name)); return l;
+      }
+      // TradingView's Fib retracement settings, in its order
+      function fibStyle(body){
+        var s = d.style;
+        row(body, check(body, 'Trend line', 'trend'), lineCtls('color', 'width', 'dash'));
+        row(body, 'Levels line', lineCtls(null, 'lw', 'ld'));
+        row(body, 'Extend lines', [inline('Left', 'extL'), inline('Right', 'extR')]);
+        var grid = UI.el('div', 'lv');                           // the 24 levels in two columns: on or off, the ratio, the color
+        s.levels.forEach(function(v){
+          var cell = UI.el('div'), cb = UI.el('input'), num = UI.el('input');
+          cb.type = 'checkbox'; cb.checked = !!v.on; cb.onchange = function(){ v.on = cb.checked; live(); };
+          num.type = 'number'; num.step = 'any'; num.className = 'num'; num.value = v.k;
+          num.oninput = function(){ var k = parseFloat(num.value); if (isFinite(k)) { v.k = k; live(); } };
+          cell.appendChild(cb); cell.appendChild(num); cell.appendChild(UI.swatch(v.c, function(c){ v.c = c; live(); }, colors));
+          grid.appendChild(cell);
+        });
+        body.appendChild(grid);
+        row(body, check(body, 'Use one color', 'one'), [UI.swatch(s.oneColor, function(c){ s.oneColor = c; live(); }, colors)]);
+        var op = UI.el('input'), pc = UI.el('span', 'pct');               // the background's opacity (TradingView: its transparency)
+        op.type = 'range'; op.min = 0; op.max = 100; op.value = Math.round(s.alpha * 100);
+        var showOp = function(){ pc.textContent = op.value + '%'; };
+        op.oninput = function(){ s.alpha = op.value / 100; showOp(); live(); }; showOp();
+        row(body, check(body, 'Background', 'fill'), [op, pc]);
+        check(body, 'Reverse', 'reverse');
+        check(body, 'Prices', 'prices');
+        row(body, check(body, 'Levels', 'coeffs'), [pick([['values','Values'], ['percents','Percents']], s.pct ? 'percents' : 'values', function(v){ s.pct = v === 'percents'; })]);
+        row(body, 'Labels', [pick([['left','Left'], ['center','Center'], ['right','Right']], s.hpos, function(v){ s.hpos = v; }),
+                             pick([['top','Top'], ['middle','Middle'], ['bottom','Bottom']], s.vpos, function(v){ s.vpos = v; })]);
+        row(body, 'Font size', [pick([10,11,12,14,16,20,24,28,32,40].map(function(v){ return [v, v]; }), s.font, function(v){ s.font = +v; })]);
+        if (logChart()) check(body, 'Fib levels based on log scale', 'log');   // (as on TradingView: offered on a log scale only)
+      }
       UI.dialog({title: TYPES[d.type].name, tabs: [
         {name:'Style', render: function(body){
-          var row = UI.el('div', 'row'), ctl = UI.el('div', 'ctl');
-          row.appendChild(UI.el('span', 'name', rect ? 'Border' : 'Line'));
-          ctl.appendChild(UI.swatch(d.style.color, function(v){ d.style.color = v; live(); }, colors));
-          var w = UI.el('select', null, [1,2,3,4].map(function(v){ return '<option value="' + v + '">' + v + 'px</option>'; }).join('')); w.value = d.style.width;
-          w.onchange = function(){ d.style.width = +w.value; live(); };
-          var st = UI.el('select', null, '<option value="0">Solid</option><option value="1">Dashed</option><option value="2">Dotted</option>'); st.value = d.style.dash;
-          st.onchange = function(){ d.style.dash = +st.value; live(); };
-          ctl.appendChild(w); ctl.appendChild(st); row.appendChild(ctl); body.appendChild(row);
+          if (d.type === 'fib') { fibStyle(body); return; }
+          row(body, rect ? 'Border' : 'Line', lineCtls('color', 'width', 'dash'));
           if (rect) {
-            var bgRow = check(body, 'Background', 'fill'), bgCtl = UI.el('div', 'ctl');
-            bgCtl.appendChild(UI.swatch(d.style.bg, function(v){ d.style.bg = v; live(); }, colors)); bgRow.appendChild(bgCtl);
+            row(body, check(body, 'Background', 'fill'), [UI.swatch(d.style.bg, function(v){ d.style.bg = v; live(); }, colors)]);
+            row(body, check(body, 'Middle line', 'midLine'), lineCtls('midColor', 'midWidth', 'midDash'));
             check(body, 'Extend left', 'extL'); check(body, 'Extend right', 'extR');
             return;
           }
@@ -573,9 +724,9 @@
     // The second point of the drawing being placed, at mouse position p. Shift decides first (a line stays level, a
     // rectangle stays square); without it, the magnet.
     function endAt(p){
-      var d = placing.d, q = shift && d.type === 'rectangle' ? squared(p, toPx(d.points[0])) : p;
-      var a = anchorAt(q.x, q.y, shift); if (!a) return;
-      d.points[1] = d.type === 'rectangle' ? a : horizontal(a, d.points[0]);
+      var d = placing.d, line = d.type === 'trendline', q = shift && d.type === 'rectangle' ? squared(p, toPx(d.points[0])) : p;
+      var a = anchorAt(q.x, q.y, shift && d.type !== 'fib'); if (!a) return;
+      d.points[1] = line ? horizontal(a, d.points[0]) : a;
     }
 
     host.addEventListener('mousedown', function(e){
@@ -589,7 +740,7 @@
         if (placing) { endAt(p); finish(); return; }             // second click
         var a = anchorAt(p.x, p.y); if (!a) return;
         if (ui.hide || ui.lock) { ui.hide = ui.lock = false; saveUi(); sideButtons(); }   // a new drawing shows them again, like TradingView
-        placing = {d: {id:newId(), type:tool, points:[a, {t:a.t, p:a.p}], style:Object.assign({}, defaults[tool])}, from:p, down:true, dragged:false};
+        placing = {d: {id:newId(), type:tool, points:[a, {t:a.t, p:a.p}], style:clone(defaults[tool])}, from:p, down:true, dragged:false};
         redrawAll(); return;
       }
       var h = hitAt(p.x, p.y);
@@ -635,8 +786,8 @@
           d.points = np;
           host.style.cursor = gripCursor(d, g);                  // a corner dragged past its opposite one: the diagonal turns
         } else {
-          var a2 = anchorAt(p.x, p.y, shift); if (!a2) return;
-          d.points[drag.part] = horizontal(a2, d.points[1 - drag.part]);
+          var a2 = anchorAt(p.x, p.y, shift && d.type !== 'fib'); if (!a2) return;
+          d.points[drag.part] = d.type === 'fib' ? a2 : horizontal(a2, d.points[1 - drag.part]);
         }
         requestUpdate(); return;
       }
@@ -696,6 +847,7 @@
       else if (e.altKey && mod && e.code === 'KeyH') { e.preventDefault(); toggleHide(); }
       else if (e.altKey && !mod && e.code === 'KeyT') { e.preventDefault(); setTool('trendline'); }
       else if (e.altKey && !mod && e.shiftKey && e.code === 'KeyR') { e.preventDefault(); setTool('rectangle'); }
+      else if (e.altKey && !mod && !e.shiftKey && e.code === 'KeyF') { e.preventDefault(); setTool('fib'); }
       else if (mod && k === 'z' && !e.shiftKey) { e.preventDefault(); doUndo(); }
       else if (mod && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); doRedo(); }
     });
@@ -712,7 +864,8 @@
       _state: function(){ return {tool:tool, items:items, selected:selected && selected.id, undo:undo.length, redo:redo.length, placing:!!placing,
                                   magnet: !!ui.magnet, mark: mark, hover: hover && hover.id,
                                   loaded: !!(mk && mk.loaded), rev: mk && mk.rev, failed: mk && mk.failed, left: left.length}; },   // tests, console
-      _px: function(i){ return items[i] ? items[i].points.map(toPx) : null; }
+      _px: function(i){ return items[i] ? items[i].points.map(toPx) : null; },
+      _fib: function(i){ var d = items[i], a = d && toPx(d.points[0]), b = d && toPx(d.points[1]); return d && d.type === 'fib' && a && b ? fibGeo(d, a, b, ts.width()) : null; }
     };
   };
 })();
