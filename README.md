@@ -106,6 +106,7 @@ amount of market activity. TradingView does not draw them, so this does.
 
 ## Run
 
+Get it with `git clone https://github.com/kidze/dollarbarchart.git` (or Code → Download ZIP on GitHub).
 Needs Python 3.10+ with `numpy`, `pandas` and `pyarrow` (`pip install -r requirements.txt`).
 
 * **Windows:** double-click `launch.cmd`. It starts the server (windowless), waits for it, and opens the
@@ -172,4 +173,5 @@ When the branch is merged and pulled into the main checkout, the running app sho
 
 ## Licence
 
-MIT (see `LICENSE`). Lightweight Charts is Apache-2.0, © TradingView, Inc.
+PolyForm Noncommercial 1.0.0 (see `LICENSE`): free to use, change and share for any noncommercial
+purpose; commercial use needs the author's permission. Lightweight Charts is Apache-2.0, © TradingView, Inc.
