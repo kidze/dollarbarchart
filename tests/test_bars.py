@@ -262,8 +262,10 @@ def test_bars_built_at_once_are_the_bars_built_one_by_one():
     for k in B.ADAPTIVE:
         got, want = sets[f"a:{k}"], one_by_one(cd, "a", k)
         assert (got["bars"], got["forming"], got["start"]) == want
-    bars, _, _ = B.dollar_bars(cd, 3.3e7)
-    assert list(bars[0]) == ["t", "e", "o", "h", "l", "c", "d", "n"] and all(type(bars[0][f]) is int for f in "tedn")
+    bars, forming, _ = B.dollar_bars(cd, 3.3e7)
+    assert list(bars[0]) == ["t", "e", "o", "h", "l", "c", "v", "d", "n"] and all(type(bars[0][f]) is int for f in "tedn")
+    vol = sum(b["v"] for b in bars) + (forming["v"] if forming else 0.0)   # every candle's base volume is in one bar
+    assert all(type(b["v"]) is float for b in bars[:50]) and abs(vol / float(cd.v[:cd.n].sum()) - 1) < 1e-5
     cd.d[5000] = -1e9                                                # running dollars that fall (a bad row): the plain search, same answer
     for size in (2e6, 3.3e7):
         assert B.dollar_bars(cd, size) == one_by_one(cd, "d", size)
