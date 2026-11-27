@@ -24,6 +24,8 @@
    the price axis wider. Zoomed in on a stretch where the price is far from a line, the line is simply off screen.
 
    They show on Bitcoin charts only; on any other chart the switches are remembered and nothing is drawn.
+
+   Under them in the same menu: the indicators loaded from a file (scripts.js) and "Load indicator…".
    Exposes window.DBCIndicators(app). */
 (function(){
   'use strict';
@@ -196,7 +198,7 @@
     function clear(){ hovered = null; inds.forEach(function(o){ o.drop(); }); legend(); }   // another market is loading
     function hover(r){ hovered = r || null; legend(); }             // null: the mouse left the bars, back to the newest
 
-    function button(){ $('bInd').className = 'tb' + (inds.some(function(o){ return o.on; }) ? ' on' : ''); }
+    function button(){ $('bInd').className = 'tb' + (inds.some(function(o){ return o.on; }) || (app.scripts && app.scripts.anyOn()) ? ' on' : ''); }
     function toggle(o){
       o.on = !o.on;
       var all = {}; inds.forEach(function(x){ all[x.def.id] = x.on; });
@@ -208,11 +210,11 @@
       UI.menu(anchor, [{head: 'Indicators'}].concat(inds.map(function(o){
         return {on: o.on, onClick: function(){ toggle(o); },
                 html: '<span class="ck">✓</span><span title="' + o.def.tip + '">' + o.def.name + '</span>' + note};
-      })));
+      }), app.scripts ? app.scripts.menuItems() : []));
     }
     button();
 
-    return {reset: reset, render: render, update: update, clear: clear, hover: hover, menu: menu,
+    return {reset: reset, render: render, update: update, clear: clear, hover: hover, menu: menu, button: button,
             isBitcoin: isBitcoin, list: inds};
   };
 })();

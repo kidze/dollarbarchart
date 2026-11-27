@@ -1943,7 +1943,9 @@
   // ---------------------------------------------------------------- the worker
   // The page sends the chart's bars ({op:'data'}: from which bar they changed, how many are closed) and the scripts
   // ({op:'set'} with the source and the saved inputs, {op:'drop'}); after each batch every script runs what is new and
-  // its outputs go back ({op:'out'}, or {op:'error'}). {op:'check'} compiles a file being loaded and says what is in it.
+  // its outputs go back ({op:'out'}, or {op:'error'}), then {op:'idle', seq} says the batch is done: seq is the highest
+  // `seq` of the messages it covered, so the page can tell a worker that is still busy from one that is stuck.
+  // {op:'check'} compiles a file being loaded and says what is in it.
   function Feed(){ this.cap = 0; this.cols = {}; this.n = 0; this.conf = 0; this.gen = null; this.sym = {}; this.dirty = Infinity; }
   var COLS = ['t', 'e', 'o', 'h', 'l', 'c', 'v'];
   Feed.prototype.put = function(m){
@@ -1965,7 +1967,7 @@
     return D;
   };
   function serve(scope){
-    var feed = new Feed(), scripts = {}, timer = 0;
+    var feed = new Feed(), scripts = {}, timer = 0, seen = 0;
     function post(m, tr){ scope.postMessage(m, tr || []); }
     function schedule(){ if (!timer) timer = setTimeout(tick, 0); }
     function tick(){
@@ -1994,9 +1996,11 @@
           post({op: 'error', id: id, v: s.v, gen: feed.gen, error: s.err});
         }
       });
+      post({op: 'idle', seq: seen});
     }
     scope.onmessage = function(ev){
       var m = ev.data || {};
+      if (m.seq > seen) seen = m.seq;
       if (m.op === 'data') { feed.put(m); schedule(); }
       else if (m.op === 'set') { scripts[m.id] = {source: m.source, inputs: m.inputs || {}, v: m.v, run: null, err: null}; schedule(); }
       else if (m.op === 'drop') delete scripts[m.id];

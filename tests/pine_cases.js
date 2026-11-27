@@ -262,9 +262,9 @@
     Pine.serve(scope);
     var rs = walk(30), Dw = data(rs, 29), cols = {};
     ['t', 'e', 'o', 'h', 'l', 'c', 'v'].forEach(function(k){ cols[k] = Dw[k].slice(0, 30); });
-    scope.onmessage({data: {op: 'data', gen: 'g1', sym: {ticker: 'X'}, from: 0, n: 30, conf: 29, cols: cols}});
-    scope.onmessage({data: {op: 'set', id: 'a', v: 1, source: head(5) + 'plot(close)', inputs: {}}});
-    scope.onmessage({data: {op: 'set', id: 'b', v: 1, source: head(5) + 'plot(foo)', inputs: {}}});
+    scope.onmessage({data: {op: 'data', gen: 'g1', sym: {ticker: 'X'}, from: 0, n: 30, conf: 29, cols: cols, seq: 1}});
+    scope.onmessage({data: {op: 'set', id: 'a', v: 1, source: head(5) + 'plot(close)', inputs: {}, seq: 2}});
+    scope.onmessage({data: {op: 'set', id: 'b', v: 1, source: head(5) + 'plot(foo)', inputs: {}, seq: 3}});
     scope.onmessage({data: {op: 'check', rid: 9, source: head(5) + 'x = input.int(3, "X")\nplot(close)'}});
     setTimeout(function(){
       try {
@@ -275,6 +275,8 @@
         same(arr(out[0].outs[0].v), arr(Dw.c));
         same([err[0].id, err[0].error.ln], ['b', 3]);
         same([chk[0].rid, chk[0].ok, chk[0].info.inputs[0].key], [9, true, 'X']);
+        same(msgs.filter(function(m){ return m.op === 'idle'; }).map(function(m){ return m.seq; }), [3], 'one batch, covering all three');
+        same(msgs[msgs.length - 1].op, 'idle', 'idle comes after the outputs');
         msgs.length = 0;                                           // a new price on the forming bar: only that bar comes back
         var c2 = {}; ['t', 'e', 'o', 'h', 'l', 'c', 'v'].forEach(function(k){ c2[k] = Dw[k].slice(29, 30); });
         c2.c[0] = 123;

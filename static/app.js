@@ -1,6 +1,6 @@
 /* The chart page: loads a market's bar sets from the local server, keeps the forming bar live, the ticker picker,
    watchlist, hover legend, info panel, update banner, and wires the settings dialog (settings.js), the drawing
-   tools (draw.js) and the indicators (indicators.js) to the chart. */
+   tools (draw.js), the built-in indicators (indicators.js) and the ones loaded from a file (scripts.js) to the chart. */
 (function(){
   'use strict';
   var app = window.DBCApp = {};                                  // index.html checks this exists (all scripts arrived)
@@ -146,7 +146,7 @@
 
   // ---------------------------------------------------------------- chart
   var rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 14;     // the page's UI size, see html{font-size}
-  var chart, series, scale, settings, draw, ind;
+  var chart, series, scale, settings, draw, ind, scripts;
 
   // ---------------------------------------------------------------- auto scale: an abnormal candle does not set the price range
   // One wick to a tenth of a cent (a bad fill, a flash crash on one exchange), or the first bar of a history (years of
@@ -272,7 +272,7 @@
   var hoverT = null;
   function legend(){
     var h = hoverT !== null ? byTime[hoverT] : null, r = h || forming || bars[bars.length-1], e = $('lgBar');
-    ind.hover(h);
+    ind.hover(h); scripts.hover(h);
     if (!r) { e.className = ''; e.innerHTML = ''; return; }
     var chg = (r.c / r.o - 1) * 100, isForming = forming && r.t === forming.t;
     var f = function(k, v){ return '<span><em>' + k + '</em>' + fmtP(v) + '</span>'; };
@@ -293,7 +293,7 @@
   function candle(r){ return {time:r.t, open:r.o, high:r.h, low:r.l, close:r.c}; }
   // One new or changed bar, to the candles and the indicators. old = it is not the chart's newest bar (the chart
   // refuses a bar behind its newest one unless told it is a correction of a bar it already has).
-  function put(r, old){ series.update(candle(r), !!old); ind.update(r); }
+  function put(r, old){ series.update(candle(r), !!old); ind.update(r); scripts.update(r); }
   function precisionFor(px){ var p = px >= 1000 ? 0 : px >= 10 ? 2 : px >= 0.1 ? 4 : px >= 0.001 ? 6 : px >= 1e-5 ? 8 : px >= 1e-7 ? 10 : 12; series.applyOptions({priceFormat:{type:'price',precision:p,minMove:Math.pow(10,-p)}}); }
   // The status dot (green live, amber busy, red trouble) with a word only when it is not simply live; the details are
   // its tooltip. While history downloads, a hairline under the top bar fills up.
@@ -355,7 +355,8 @@
     if (forming) { byTime[forming.t] = forming; data.push(candle(forming)); }
     if (data.length) precisionFor(data[data.length-1].close);
     seq++;
-    ind.reset(); series.setData(data); ind.render(rows()); fitLimit();
+    var all = rows();
+    ind.reset(); series.setData(data); ind.render(all); scripts.render(all, !!reset); fitLimit();
     if (reset) { chart.timeScale().setVisibleLogicalRange({from:Math.max(0, data.length - 260), to:data.length + 4}); scale.applyOptions({autoScale:true}); }
     legend(); settings.priceLine(); draw.refresh();
   }
@@ -463,7 +464,7 @@
     if (k === market) return;
     market = k; size = sizes[market] || null; bars = []; forming = null; meta = null; seq++;
     history.replaceState(null, '', '#' + market);
-    hoverT = null; ind.clear(); series.setData([]); $('lgBar').innerHTML = '';
+    hoverT = null; ind.clear(); scripts.clear(); series.setData([]); $('lgBar').innerHTML = '';
     $('tName').textContent = k.split(':')[1] || k;
     draw.setMarket(market);
     save(); load(true);
@@ -572,7 +573,7 @@
     $('bInfo').onclick = function(){ UI.popover(this, info()); };
   }
 
-  // what settings.js, draw.js and indicators.js see of the page
+  // what settings.js, draw.js, indicators.js and scripts.js see of the page
   app.store = store;
   app.post = post;
   app.saveState = saveState;
@@ -580,18 +581,21 @@
   app.timeToLogical = timeToLogical;
   app.logicalToTime = logicalToTime;
   app.barCount = function(){ return bars.length + (forming ? 1 : 0); };
+  app.closed = function(){ return bars.length; };                // the bars that have closed (the forming one comes after them)
   app.rows = rows;
   app.fitRange = fitRange;
   app.market = function(){ return market; };
   app.marketInfo = function(){ return meta && meta.market; };
   app.fmtP = fmtP; app.fmtT = fmtT; app.fmtHrs = fmtHrs;
   app.mode = function(){ return mode; };
+  app.tf = function(){ return tf; };
 
   store.load().then(function(){
     app.win = DBCWindow(store);                                   // the app window back to its last size and place
     makeChart();
     app.chart = chart; app.series = series;
     settings = app.settings = DBCSettings(app);
+    scripts = app.scripts = DBCScripts(app);                      // before the drawings: what indicators draw goes under them
     draw = app.draw = DBCDraw(app);
     ind = app.ind = DBCIndicators(app);
     wire();

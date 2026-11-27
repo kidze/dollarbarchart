@@ -124,12 +124,27 @@ def free_port():
         return s.getsockname()[1]
 
 
+def temp_dir(prefix):
+    """A new folder in the temp folder. On Windows it keeps the temp folder's own permissions: there tempfile.mkdtemp
+    makes a folder only its owner may use (Python 3.12.4 and later), and a browser whose profile is in such a folder
+    can fail to start: its DevTools port never opens (its sandboxed processes cannot use the profile)."""
+    if os.name != "nt":
+        return tempfile.mkdtemp(prefix=prefix)
+    while True:
+        p = os.path.join(tempfile.gettempdir(), prefix + os.urandom(6).hex())
+        try:
+            os.mkdir(p)
+            return p
+        except FileExistsError:
+            pass
+
+
 def run_page(page_uri, expression, wait_s=240):
     """Opens page_uri in a fresh headless profile and returns the first non-empty value of `expression` (a JS string)."""
     exe = browser()
     if not exe:
         return None
-    tmp, port, bws = tempfile.mkdtemp(prefix="dbc-pine-"), free_port(), None
+    tmp, port, bws = temp_dir("dbc-pine-"), free_port(), None
     proc = subprocess.Popen([exe, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-extensions",
                              "--user-data-dir=" + str(Path(tmp) / "profile"), f"--remote-debugging-port={port}", page_uri],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -177,7 +192,7 @@ def run_page(page_uri, expression, wait_s=240):
 
 def run_cases():
     """The results of tests/pine_cases.js: a list of {name, ok, msg}, or None when there is no browser to run them in."""
-    tmp = Path(tempfile.mkdtemp(prefix="dbc-pine-page-"))
+    tmp = Path(temp_dir("dbc-pine-page-"))
     try:
         page = tmp / "run.html"
         page.write_text(PAGE.replace("{pine}", (ROOT / "static" / "pine.js").as_uri())
