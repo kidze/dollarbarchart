@@ -82,6 +82,18 @@ amount of market activity. TradingView does not draw them, so this does.
     0.48× Mar 2020, 0.48× Nov 2022, 0.51× Jun 2026).
 
   Auto scale follows the candles only: no line and no multiple makes the price axis wider.
+* **Indicators from a file** (Indicators → Load indicator…, or drop the file on the chart): a TradingView
+  indicator saved as a `.pine` or `.txt` file runs on this chart's own bars, dollar bars or time bars, and the
+  forming bar is worked out again on every price change. The file is checked first; what in it cannot run here
+  is named, with its line. The app keeps a copy in `data/indicators/`, so it is there the next time; a script
+  with the same title loaded again replaces it and keeps its settings. Each one is switched on and off in the
+  same menu (hover it there for × to remove it from the app). Its legend row shows its values at the bar under
+  the mouse, with buttons to hide it, open its settings (the script's inputs, and which outputs show in what
+  color, width and dash, previewed live) or take it off the chart. Plots in every style, fills, horizontal
+  lines, background colors, shapes, characters, arrows, labels and lines are drawn, under your drawings, and
+  none of them makes the price axis wider. Pine v4 to v6 indicators drawn on the price chart run; not yet:
+  data from another symbol or time frame (`request.security`), arrays, boxes, tables, indicators in a pane of
+  their own, strategies.
 * **Auto scale leaves an abnormal candle's far end out.** One wick to a tenth of a cent (a bad fill, a flash
   crash on one exchange), or the first bar of a long history (years of prices in one candle), would squeeze
   every other candle into a strip. Auto scale fits the candles on screen without that far end: it runs off
@@ -117,7 +129,8 @@ Needs Python 3.10+ with `numpy`, `pandas` and `pyarrow` (`pip install -r require
 
 Candles are stored per market in `data/` (about 16 MB per market-year; the full BTC perpetual history is
 ~110 MB). `data/watchlist.json` holds the watchlist; edit it or use the ☆ button. Your drawings are in
-`data/drawings.json` and the chart settings in `data/settings.json`.
+`data/drawings.json`, the chart settings in `data/settings.json` and the indicators loaded from a file in
+`data/indicators/`.
 
 Every file in `data/` is written to a temporary file, forced to the disk, then swapped in, so a crash or a
 power cut leaves either the old version or the new one. A market file that is damaged anyway (for example
@@ -144,17 +157,19 @@ Time bars are the usual candles with weeks starting Monday 00:00 UTC and months 
 | `venues.py` | the other exchanges' 1-minute candles (Binance archive + REST + websocket, OKX, Coinbase, Bitstamp, Kraken archive + trades + OHLC, KuCoin, Bitfinex with its coarser candles for minute holes, and Bybit wrapped alike); one parquet per series in `data/<exchange>_<symbol>.parquet`; resumable syncs; which market means a ticker on each exchange |
 | `combined.py` | the merge (dollars summed, dollar-weighted median prices), the repair of bad prints no second exchange confirms, and the same-coin history check |
 | `bars.py` | dollar bars and time bars from the candles, incrementally as new minutes arrive; per-market size menu |
-| `server.py` | local HTTP server: `/bars?m=&k=` (full history of the set shown), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/drawings?m=`, `/settings`, `/static/…`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |
-| `userdata.py` | saved drawings (per market) and chart settings, written crash-safe like the candles; only the app's own page may change them |
+| `server.py` | local HTTP server: `/bars?m=&k=` (full history of the set shown), `/live?m=` (last bars + forming bar), `/search?q=`, `/pick?t=`, `/watchlist`, `/drawings?m=`, `/settings`, `/scripts`, `/static/…`, `/ping`, `/restart`; one download worker (on-screen market first, then depth probes, then the watchlist); idle exit |
+| `userdata.py` | saved drawings (per market), chart settings and indicators loaded from a file, written crash-safe like the candles; only the app's own page may change them |
 | `index.html` | the page layout: top bar, drawing toolbar, chart |
 | `static/app.js` | loading and live-updating the chart, ticker picker, watchlist, stats, legend, update banner |
 | `static/draw.js` | the drawing tools (trend line, rectangle, Fib retracement, magnet), their toolbars and settings, undo/redo, saving |
 | `static/indicators.js` | the indicators (two Bitcoin power laws), their menu and legend row |
+| `static/pine.js` | the Pine Script engine: reads a script and runs it bar by bar, in a worker, the forming bar again on each change |
+| `static/scripts.js` | the indicators loaded from a file: loading and checking, their menu entries, legend rows and settings, and drawing what they output |
 | `static/settings.js` | the chart settings dialog (candles, background) |
 | `static/window.js` | the app window's size and place, remembered between launches |
 | `static/ui.js`, `static/app.css` | color picker, menus, dialogs; the page's styles |
 | `lightweight-charts.js` | TradingView Lightweight Charts v5.2.1, vendored (Apache-2.0, logo must stay) |
-| `tests/` | bar-cutting, search, crash-safety, saved-drawings and exchange/merge tests: `python tests/test_bars.py`, `python tests/test_markets.py`, `python tests/test_storage.py`, `python tests/test_userdata.py`, `python tests/test_venues.py` (or `pytest`) |
+| `tests/` | bar-cutting, search, crash-safety, saved-drawings and exchange/merge tests: `python tests/test_bars.py`, `python tests/test_markets.py`, `python tests/test_storage.py`, `python tests/test_userdata.py`, `python tests/test_venues.py`; the Pine engine and the loaded indicators in a headless Edge or Chrome: `python tests/test_pine.py`, `python tests/test_scripts.py` (or `pytest`) |
 
 Market keys are `linear:SYMBOL` (perpetual) or `spot:SYMBOL`; the page keeps the current one in the URL
 hash, so `http://127.0.0.1:8793/#spot:PUMPUSDT` opens that market directly.
