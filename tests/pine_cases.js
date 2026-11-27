@@ -177,7 +177,10 @@
     same(o.outs[0].b, up);
     var green = Pine.palette(4).green;
     same(o.outs[0].c[0], Math.floor(green / 256) * 256 + Math.round(255 * 0.5));
-    same(o.outs[1].b, dn);
+    // show_last = 5 with offset -2: the chart shows the bars from 57 on; what is older than that (and a margin) is let go
+    var keep = dn.filter(function(b){ return b >= 60 - 5 + 2 - Pine.SOFT - 2; });
+    same(o.outs[1].b, keep);
+    assert(dn.filter(function(b){ return b - 2 >= 60 - 5; }).every(function(b){ return keep.indexOf(b) >= 0; }), 'every bar it shows is kept');
     same([info.outs[0].style, info.outs[0].loc, info.outs[0].text], ['triup', 'bl', 'up']);
     same([info.outs[1].style, info.outs[1].offset, info.outs[1].show_last, info.outs[1].loc], ['9', -2, 5, 'ab']);
   });

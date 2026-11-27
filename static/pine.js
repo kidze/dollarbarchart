@@ -1877,9 +1877,9 @@
   }
   function compact(R){
     var n = R.D.n;
-    for (var i = 0; i < R.outs.length; i++) {                    // shapes that show_last will never show again
-      var o = R.outs[i];
-      if (o.kind !== 'shape' || !(o.show_last >= 0) || o.b.length < 2 * o.show_last + 256) continue;
+    for (var i = 0; i < R.outs.length; i++) {                    // shapes that show_last will never show again (the same at
+      var o = R.outs[i];                                         // every step, so a live run and a run from scratch agree)
+      if (o.kind !== 'shape' || !(o.show_last >= 0)) continue;
       var B = o.b, cut = n - o.show_last - o.offset - SOFT - 2, k = 0;
       while (k < B.length && B[k] < cut) k++;
       if (k) { B.splice(0, k); o.y.splice(0, k); o.c.splice(0, k); o.tc.splice(0, k); }
