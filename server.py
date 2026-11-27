@@ -27,6 +27,8 @@ reloads by itself.
   /watchlist?add=T | ?remove=T
   /drawings?m=  the market's saved drawings and their revision (GET), or change some (POST {"upsert": [...], "delete": [ids]})
   /settings     the chart's saved look (GET), or change some of its keys (POST {"settings": {key: value, ...}})
+  /scripts      the indicators loaded from a file, with their source (GET), or keep / remove one
+                (POST {"add": {"name", "file", "source"}} or {"delete": id}); see userdata.py
   /static/<f>   the page's scripts and styles
   /ping, /restart
 """
@@ -1295,6 +1297,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self.js({"drawings": items, "rev": rev})
             if p == "/settings":
                 return self.js({"settings": U.get_settings()})
+            if p == "/scripts":
+                return self.js({"scripts": U.list_scripts()})
             if p == "/ping":
                 if STATE["stop"]:                                # winding down: a launcher must start a fresh copy
                     return self.js({"ok": False, "stopping": True, "pid": os.getpid()}, 503)
@@ -1381,6 +1385,13 @@ class H(http.server.BaseHTTPRequestHandler):
             if p == "/settings":
                 U.change_settings(body.get("settings"))
                 return self.js({"ok": True})
+            if p == "/scripts":
+                if "add" in body:
+                    a = body["add"] if isinstance(body["add"], dict) else {}
+                    return self.js({"ok": True, "script": U.add_script(a.get("name"), a.get("file", ""), a.get("source"))})
+                if "delete" in body:
+                    return self.js({"ok": True, "deleted": U.delete_script(body["delete"])})
+                raise ValueError('send {"add": {name, file, source}} or {"delete": id}')
             self.js({"error": "not found"}, 404)
         except ValueError as e:
             self.js({"error": str(e)}, 400)

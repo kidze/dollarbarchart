@@ -69,10 +69,11 @@ class Candles:
                              "close": self.c[:n], "volume": self.v[:n], "turnover": self.d[:n]})
 
     def bar(self, i0: int, i1: int) -> dict:
-        """One bar from candles i0..i1 inclusive."""
+        """One bar from candles i0..i1 inclusive: times (s), prices, v = volume in the base coin (the `volume` of the
+        indicators people load), d = dollars, n = candles."""
         return {"t": int(self.ts[i0] // 1000), "e": int((self.ts[i1] + MINUTE) // 1000),
                 "o": _px(self.o[i0]), "h": _px(self.h[i0:i1 + 1].max()),
-                "l": _px(self.l[i0:i1 + 1].min()), "c": _px(self.c[i1]),
+                "l": _px(self.l[i0:i1 + 1].min()), "c": _px(self.c[i1]), "v": _px(self.v[i0:i1 + 1].sum()),
                 "d": int(round(float(self.d[i0:i1 + 1].sum()))), "n": int(i1 - i0 + 1)}
 
 
@@ -111,11 +112,12 @@ def bars_of(cd: Candles, s: np.ndarray, e: np.ndarray, z=None) -> list:
     a, b, at = int(s[0]), int(e[-1]) + 1, s - s[0]
     cols = [(cd.ts[s] // 1000).tolist(), ((cd.ts[e] + MINUTE) // 1000).tolist(), px_all(cd.o[s]),
             px_all(np.maximum.reduceat(cd.h[a:b], at)), px_all(np.minimum.reduceat(cd.l[a:b], at)), px_all(cd.c[e]),
+            px_all(np.add.reduceat(cd.v[a:b], at)),
             np.rint(np.add.reduceat(cd.d[a:b], at)).astype(np.int64).tolist(), (e - s + 1).tolist()]
     if z is None:
-        return [{"t": t, "e": u, "o": o, "h": h, "l": lo, "c": c, "d": d, "n": n} for t, u, o, h, lo, c, d, n in zip(*cols)]
-    return [{"t": t, "e": u, "o": o, "h": h, "l": lo, "c": c, "d": d, "n": n, "z": w}
-            for t, u, o, h, lo, c, d, n, w in zip(*cols, z)]
+        return [{"t": t, "e": u, "o": o, "h": h, "l": lo, "c": c, "v": v, "d": d, "n": n} for t, u, o, h, lo, c, v, d, n in zip(*cols)]
+    return [{"t": t, "e": u, "o": o, "h": h, "l": lo, "c": c, "v": v, "d": d, "n": n, "z": w}
+            for t, u, o, h, lo, c, v, d, n, w in zip(*cols, z)]
 
 
 def _cut(cum: np.ndarray, size_at, never_falls: bool) -> list:

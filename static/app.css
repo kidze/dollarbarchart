@@ -71,6 +71,25 @@ main{flex:1;min-height:0;display:flex}
 #lgInd{display:flex;flex-wrap:wrap;column-gap:1.1rem}            /* one entry per indicator switched on, side by side; a narrow window wraps them */
 #lgInd:empty{display:none}
 #lgInd i{display:inline-block;width:.9rem;height:2px;border-radius:1px;vertical-align:middle;margin-right:.5rem}   /* the indicator's line, in its color */
+/* indicators loaded from a file: a row each. The row takes the mouse (its buttons show on hover); the rest of the
+   legend lets the mouse through to the chart. */
+#lgScr{display:flex;flex-direction:column;align-items:flex-start}
+#lgScr:empty{display:none}
+#lgScr .sr{pointer-events:auto;display:flex;align-items:center;gap:.45rem;margin-left:-.35rem;padding:0 .35rem;border-radius:.35rem;cursor:default}
+#lgScr .sr:hover{background:rgba(26,28,32,.88)}
+#lgScr .sn{color:var(--tx)}
+#lgScr .sr.off .sn{color:var(--tx3)}
+#lgScr .sv b{font-weight:600;margin-right:.55rem}
+#lgScr .sv b:last-child{margin-right:0}
+#lgScr .sv b.na{color:var(--tx3);font-weight:400}
+#lgScr .er{color:var(--dn);cursor:help}
+#lgScr .wn{color:var(--warn);font-weight:700;cursor:help}
+#lgScr .sb{display:none;gap:.1rem}
+#lgScr .sr:hover .sb{display:flex}
+#lgScr .sb button{width:1.45rem;height:1.45rem;padding:.15rem;border:0;border-radius:.3rem;background:transparent;color:var(--tx2);cursor:pointer;display:flex;align-items:center;justify-content:center}
+#lgScr .sb button:hover{background:var(--s3);color:var(--tx)}
+#lgScr .sb svg{width:100%;height:100%}
+#wrap.drop::after{content:'';position:absolute;inset:.3rem;z-index:15;border:2px dashed var(--acc2);border-radius:.6rem;pointer-events:none}   /* a file dragged over the chart */
 #axis{position:absolute;z-index:6;right:.43rem;bottom:.36rem;display:flex;gap:.2rem}
 #axis button{width:1.45rem;height:1.3rem;padding:0;border:1px solid var(--bd);border-radius:.3rem;background:var(--s1);color:var(--tx3);
              font:700 .8rem/1 -apple-system,"Segoe UI",Inter,Roboto,sans-serif;cursor:pointer}
@@ -127,6 +146,12 @@ main{flex:1;min-height:0;display:flex}
 .menu .ck{flex:none;width:.9rem;visibility:hidden}               /* indicators menu: a tick in front of the ones switched on */
 .menu button.on .ck{visibility:visible}
 .menu .tag{margin-left:auto;padding-left:1.4rem;color:var(--tx2);font-size:.82rem;white-space:nowrap}
+.menu .tag.bad{color:var(--dn)}
+.menu .rm{display:flex;margin-left:auto;padding-left:1rem;color:var(--tx3);visibility:hidden}   /* a loaded indicator: × removes it from the app */
+.menu .tag + .rm{margin-left:0;padding-left:.6rem}
+.menu button:hover .rm{visibility:visible}
+.menu .rm:hover{color:var(--dn)}
+.menu .rm svg{width:1rem;height:1rem}
 
 /* info panel (i): what the top bar no longer spells out */
 .pop{position:fixed;z-index:40;width:21rem;max-width:calc(100vw - 1rem);background:var(--s2);border:1px solid var(--bd2);border-radius:.65rem;box-shadow:0 12px 36px rgba(0,0,0,.6);
@@ -172,6 +197,22 @@ input[type=checkbox]{width:1rem;height:1rem;accent-color:var(--acc);margin:0}
 .dlg input[type=range]{width:7.5rem;accent-color:var(--acc)}
 .dlg .pct{color:var(--tx2);min-width:2.8rem;font-variant-numeric:tabular-nums}
 .chk{background:repeating-conic-gradient(#808080 0 25%,#c0c0c0 0 50%) 0 0/.5rem .5rem}
+/* an indicator's settings, and the dialogs that say something */
+.dlg.ind{width:42rem}
+.dlg.ind .row{flex-wrap:wrap;padding:.1rem 0}
+.dlg.ind .row .name{width:15rem}
+.dlg span.inl{color:var(--tx2);margin-left:.4rem}
+.dlg .sect.next{margin-top:1.1rem}
+.dlg .gap{height:.8rem}
+.dlg .swatch-gap{width:2rem;flex:none}
+.dlg input.txt,.dlg textarea.txt{width:15rem;background:var(--bg);color:var(--tx);border:1px solid var(--bd2);border-radius:.3rem;padding:.25rem .45rem;font:inherit}
+.dlg textarea.txt{width:100%;resize:vertical}
+.dlg .tip{color:var(--tx3);cursor:help}
+.dlg .none{color:var(--tx3)}
+.dlg .body.msg{min-height:0}
+.dlg .body.msg p{margin:.15rem 0 .6rem;line-height:1.5}
+.dlg pre.src{margin:0;padding:.55rem .7rem;background:var(--bg);border:1px solid var(--bd2);border-radius:.4rem;color:var(--tx2);
+             font:.85rem/1.45 Consolas,"Cascadia Mono","Courier New",monospace;white-space:pre-wrap;word-break:break-all}
 
 /* color picker */
 .cpick{position:fixed;z-index:50;background:var(--s2);border:1px solid var(--bd2);border-radius:.55rem;box-shadow:0 10px 32px rgba(0,0,0,.65);padding:.7rem;width:16.6rem;user-select:none}

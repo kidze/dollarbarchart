@@ -114,7 +114,7 @@
     popup = {el: box, anchor: anchor, close: function(){ box.remove(); if (opts.onClose) opts.onClose(); }};
   }
 
-  /* A drop-down list under `anchor`. items: [{html, on, onClick}], or {head: 'text'} for a section heading */
+  /* A drop-down list under `anchor`. items: [{html, on, onClick(event)}], or {head: 'text'} for a section heading */
   function menu(anchor, items){
     var again = popup && popup.anchor === anchor && popup.el.classList.contains('menu');   // its button again: just close it
     closePopup();
@@ -123,7 +123,7 @@
     items.forEach(function(it){
       if (it.head) { box.appendChild(el('div', 'mh', esc(it.head))); return; }
       var b = el('button', it.on ? 'on' : '', it.html);
-      b.onclick = function(){ closePopup(); it.onClick(); };
+      b.onclick = function(e){ closePopup(); it.onClick(e); };   // (the event: which part of the item was clicked)
       box.appendChild(b);
     });
     document.body.appendChild(box);

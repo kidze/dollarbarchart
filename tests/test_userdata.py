@@ -23,13 +23,13 @@ class TempData:
 
     def __enter__(self) -> Path:
         self.d = Path(tempfile.mkdtemp(prefix="dbc-user-"))
-        self.old = X.DATA, U.DRAWINGS, U.SETTINGS
-        X.DATA, U.DRAWINGS, U.SETTINGS = self.d, self.d / "drawings.json", self.d / "settings.json"
+        self.old = X.DATA, U.DRAWINGS, U.SETTINGS, U.SCRIPTS
+        X.DATA, U.DRAWINGS, U.SETTINGS, U.SCRIPTS = self.d, self.d / "drawings.json", self.d / "settings.json", self.d / "indicators"
         U.forget()
         return self.d
 
     def __exit__(self, *exc):
-        X.DATA, U.DRAWINGS, U.SETTINGS = self.old
+        X.DATA, U.DRAWINGS, U.SETTINGS, U.SCRIPTS = self.old
         U.forget()
         shutil.rmtree(self.d, ignore_errors=True)
 
@@ -116,6 +116,40 @@ def test_damaged_file_is_set_aside_not_fatal():
         assert U.get_drawings(KEY)[0] == [LINE]
 
 
+SRC = '//@version=5\nindicator("My MA", overlay = true)\nplot(ta.sma(close, 20))\n'
+
+
+def test_scripts_kept_replaced_by_title_and_removed():
+    with TempData() as d:
+        assert U.list_scripts() == []
+        a = U.add_script("My MA", r"C:\some\where\ma.pine", SRC)
+        assert a["id"] == "my-ma" and a["file"] == "ma.pine" and (d / "indicators" / "my-ma.pine").read_text(encoding="utf-8") == SRC
+        b = U.add_script("Other one", "o.txt", SRC.replace("My MA", "Other one"))
+        newer = SRC.replace("20", "50")
+        c = U.add_script("My MA", "ma2.pine", newer)             # the same title again: a new version, in its old place
+        U.forget()                                               # (as after a restart)
+        got = U.list_scripts()
+        assert [x["id"] for x in got] == ["my-ma", "other-one"] and got[0]["source"] == newer and got[0]["file"] == "ma2.pine"
+        assert got[0]["added"] == a["added"] and c["updated"] >= a["updated"] and b["id"] == "other-one"
+        assert U.delete_script("my-ma") is True and U.delete_script("my-ma") is False
+        assert [x["id"] for x in U.list_scripts()] == ["other-one"] and not (d / "indicators" / "my-ma.pine").exists()
+        assert U.script_id("TD Sequential (Classic) by Kidze!") == "td-sequential-classic-by-kidze" and U.script_id("§§") == "indicator"
+        for bad in [("", "x.pine", SRC), ("T", "x.pine", ""), ("T", "x.pine", "x" * (U.MAX_SCRIPT + 1)), ("T", 5, SRC), (None, "x", SRC)]:
+            try:
+                U.add_script(*bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted {bad[:2]}")
+        for bad in ["../x", "", 7]:
+            try:
+                U.delete_script(bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"accepted id {bad!r}")
+
+
 def test_http_routes():
     import http.server
     import server as S
@@ -151,6 +185,15 @@ def test_http_routes():
             assert call(f"/drawings?m={KEY}", raw=b"not json")[0] == 400
             assert call("/drawings?m=bad%20key", {"upsert": [LINE]})[0] == 400
             assert call(f"/drawings?m={KEY}") == (200, {"drawings": [LINE], "rev": j2["rev"]})   # none of that changed anything
+            st, j = call("/scripts", {"add": {"name": "My MA", "file": "ma.pine", "source": SRC}})
+            assert st == 200 and j["ok"] and j["script"]["id"] == "my-ma"
+            st, j = call("/scripts")
+            assert st == 200 and [(x["id"], x["source"]) for x in j["scripts"]] == [("my-ma", SRC)]
+            assert call("/scripts", {"add": {"name": "x", "file": "x", "source": SRC}}, {"Origin": "https://evil.example"})[0] == 403
+            assert call("/scripts", {"add": {"name": "", "source": SRC}})[0] == 400
+            assert call("/scripts", {"nothing": 1})[0] == 400
+            assert call("/scripts", {"delete": "my-ma"}) == (200, {"ok": True, "deleted": True})
+            assert call("/scripts") == (200, {"scripts": []})
             for bad in ["/static/../server.py", "/static/%2e%2e/server.py", "/static/nope.js", "/static/x.py"]:
                 assert call(bad)[0] == 404, bad
             assert all(f in S.sources() for f in ("userdata.py", "index.html"))

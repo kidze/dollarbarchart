@@ -1,8 +1,12 @@
-"""What the owner makes on the chart and wants back next time: drawings (per market) and the chart's look.
+"""What the owner makes on the chart and wants back next time: drawings (per market), the chart's look, and the
+indicators loaded from a file.
 
-Both live in data/ next to the candles and are written the same crash-safe way (bybit_sync.write_durably):
+All live in data/ next to the candles and are written the same crash-safe way (bybit_sync.write_durably):
   data/drawings.json   {"linear:BTCUSDT": [drawing, ...], ...}    one list per market, shared by every bar size
   data/settings.json   {"appearance": {...}, ...}                 whatever the page sends
+  data/indicators/     the Pine scripts loaded with Indicators → Load indicator: <id>.pine each, as the file was,
+                       and index.json listing them ({"scripts": [{id, name, file, added, updated}]}). The id comes
+                       from the script's title, so loading a new version of a script replaces the old one.
 
 Pages never send a whole list or the whole settings object, only what they changed: drawings as upserts and deletes
 by id, settings as the top-level keys that changed. Two app windows open at once (launch.cmd run again, or dollar bars
@@ -18,12 +22,16 @@ import json
 import os
 import re
 import threading
+import time
 import uuid
 
 import bybit_sync as X
 
 DRAWINGS = X.DATA / "drawings.json"
 SETTINGS = X.DATA / "settings.json"
+SCRIPTS = X.DATA / "indicators"
+MAX_SCRIPT = 1_000_000                                           # characters of one script's source
+MAX_SCRIPTS = 200
 MAX_BODY = 4_000_000                                             # bytes of one POST
 MAX_DRAWINGS = 5_000                                             # per market
 KEY_RE = re.compile(r"[a-z]+:[A-Za-z0-9._-]{1,40}")              # market keys: linear:BTCUSDT, spot:PUMPUSDT
@@ -132,3 +140,71 @@ def change_settings(changes) -> None:
                 d[k] = v
         _write(SETTINGS, d)
         _cache[str(SETTINGS)] = d
+
+
+# ---------------------------------------------------------------- indicators loaded from a file
+
+def _index() -> list:
+    d = _read(SCRIPTS / "index.json")
+    items = d.get("scripts")
+    return [x for x in items if isinstance(x, dict) and isinstance(x.get("id"), str) and ID_RE.fullmatch(x["id"])] if isinstance(items, list) else []
+
+
+def script_id(name: str) -> str:
+    """A script's id: its title in lower case, words joined by dashes ("TD Sequential" -> "td-sequential")."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40].strip("-") or "indicator"
+
+
+def list_scripts() -> list:
+    """The loaded scripts in the order they were first loaded, each with its source: [{id, name, file, added, updated, source}]."""
+    with _LOCK:
+        out = []
+        for e in _index():
+            try:
+                out.append(dict(e, source=(SCRIPTS / (e["id"] + ".pine")).read_text(encoding="utf-8")))
+            except (FileNotFoundError, UnicodeDecodeError):
+                continue                                         # a file taken away by hand: the script is simply gone
+        return out
+
+
+def add_script(name, file, source) -> dict:
+    """Keep a script the page loaded (and checked): a new one, or a new version of one with the same title."""
+    if not isinstance(name, str) or not name.strip() or len(name) > 200:
+        raise ValueError("a script needs its title (200 characters at most)")
+    if not isinstance(file, str) or len(file) > 260:
+        raise ValueError("bad file name")
+    if not isinstance(source, str) or not source.strip() or len(source) > MAX_SCRIPT:
+        raise ValueError(f"a script's source is text of {MAX_SCRIPT:,} characters at most")
+    sid, now = script_id(name), int(time.time())
+    with _LOCK:
+        items = _index()
+        old = next((x for x in items if x["id"] == sid), None)
+        if not old and len(items) >= MAX_SCRIPTS:
+            raise ValueError(f"{MAX_SCRIPTS} scripts at most: remove one first")
+        entry = {"id": sid, "name": name.strip(), "file": os.path.basename(file), "added": old["added"] if old else now, "updated": now}
+        body = source.encode("utf-8")
+        SCRIPTS.mkdir(parents=True, exist_ok=True)
+        X.write_durably(SCRIPTS / (sid + ".pine"), lambda f: f.write(body))
+        items = [entry if x["id"] == sid else x for x in items] if old else items + [entry]
+        d = {"scripts": items}
+        _write(SCRIPTS / "index.json", d)
+        _cache[str(SCRIPTS / "index.json")] = d
+        return entry
+
+
+def delete_script(sid) -> bool:
+    """Take a script off the list and delete its copy here (the file it was loaded from is not touched)."""
+    if not isinstance(sid, str) or not ID_RE.fullmatch(sid):
+        raise ValueError("bad script id")
+    with _LOCK:
+        items = _index()
+        if not any(x["id"] == sid for x in items):
+            return False
+        d = {"scripts": [x for x in items if x["id"] != sid]}
+        _write(SCRIPTS / "index.json", d)
+        _cache[str(SCRIPTS / "index.json")] = d
+        try:
+            (SCRIPTS / (sid + ".pine")).unlink()
+        except FileNotFoundError:
+            pass
+        return True
